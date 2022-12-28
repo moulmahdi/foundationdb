@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,8 @@ std::unique_ptr<IConfigConsumer> IConfigConsumer::createSimple(ServerCoordinator
 
 std::unique_ptr<IConfigConsumer> IConfigConsumer::createPaxos(ServerCoordinators const& coordinators,
                                                               double pollingInterval,
-                                                              Optional<double> compactionInterval) {
-	return std::make_unique<PaxosConfigConsumer>(coordinators, pollingInterval, compactionInterval);
+                                                              Optional<double> compactionInterval,
+                                                              bool readPreviousCoordinators) {
+	return std::make_unique<PaxosConfigConsumer>(
+	    coordinators, pollingInterval, compactionInterval, readPreviousCoordinators);
 }

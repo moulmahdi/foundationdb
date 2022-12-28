@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,25 +25,23 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct Increment : TestWorkload {
+	static constexpr auto NAME = "Increment";
 	int actorCount, nodeCount;
 	double testDuration, transactionsPerSecond, minExpectedTransactionsPerSecond;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, retries, tooOldRetries, commitFailedRetries;
 	PerfDoubleCounter totalLatency;
 
 	Increment(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries"), tooOldRetries("Retries.too_old"),
 	    commitFailedRetries("Retries.commit_failed"), totalLatency("Latency") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		transactionsPerSecond = getOption(options, LiteralStringRef("transactionsPerSecond"), 5000.0);
-		actorCount = getOption(options, LiteralStringRef("actorsPerClient"), transactionsPerSecond / 5);
-		nodeCount = getOption(options, LiteralStringRef("nodeCount"), transactionsPerSecond * clientCount);
-		minExpectedTransactionsPerSecond =
-		    transactionsPerSecond * getOption(options, LiteralStringRef("expectedRate"), 0.7);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		transactionsPerSecond = getOption(options, "transactionsPerSecond"_sr, 5000.0);
+		actorCount = getOption(options, "actorsPerClient"_sr, transactionsPerSecond / 5);
+		nodeCount = getOption(options, "nodeCount"_sr, transactionsPerSecond * clientCount);
+		minExpectedTransactionsPerSecond = transactionsPerSecond * getOption(options, "expectedRate"_sr, 0.7);
 	}
-
-	std::string description() const override { return "IncrementWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override {
@@ -61,14 +59,14 @@ struct Increment : TestWorkload {
 		clients.clear();
 		return incrementCheck(cx->clone(), this, !errors);
 	}
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
 		m.push_back(tooOldRetries.getMetric());
 		m.push_back(commitFailedRetries.getMetric());
-		m.push_back(PerfMetric("Avg Latency (ms)", 1000 * totalLatency.getValue() / transactions.getValue(), true));
-		m.push_back(PerfMetric("Read rows/simsec (approx)", transactions.getValue() * 3 / testDuration, false));
-		m.push_back(PerfMetric("Write rows/simsec (approx)", transactions.getValue() * 4 / testDuration, false));
+		m.emplace_back("Avg Latency (ms)", 1000 * totalLatency.getValue() / transactions.getValue(), Averaged::True);
+		m.emplace_back("Read rows/simsec (approx)", transactions.getValue() * 3 / testDuration, Averaged::False);
+		m.emplace_back("Write rows/simsec (approx)", transactions.getValue() * 4 / testDuration, Averaged::False);
 	}
 
 	static Key intToTestKey(int i) { return StringRef(format("%016d", i)); }
@@ -84,11 +82,11 @@ struct Increment : TestWorkload {
 				while (true) {
 					try {
 						tr.atomicOp(intToTestKey(deterministicRandom()->randomInt(0, self->nodeCount / 2)),
-						            LiteralStringRef("\x01"),
+						            "\x01"_sr,
 						            MutationRef::AddValue);
 						tr.atomicOp(
 						    intToTestKey(deterministicRandom()->randomInt(self->nodeCount / 2, self->nodeCount)),
-						    LiteralStringRef("\x01"),
+						    "\x01"_sr,
 						    MutationRef::AddValue);
 						wait(tr.commit());
 						break;
@@ -110,7 +108,7 @@ struct Increment : TestWorkload {
 		}
 	}
 	bool incrementCheckData(const VectorRef<KeyValueRef>& data, Version v, Increment* self) {
-		TEST(self->transactions.getValue()); // incrementCheckData transaction has value
+		CODE_PROBE(self->transactions.getValue(), "incrementCheckData transaction has value");
 		if (self->transactions.getValue() && data.size() == 0) {
 			TraceEvent(SevError, "TestFailure")
 			    .detail("Reason", "No successful increments")
@@ -177,4 +175,4 @@ struct Increment : TestWorkload {
 	}
 };
 
-WorkloadFactory<Increment> IncrementWorkloadFactory("Increment");
+WorkloadFactory<Increment> IncrementWorkloadFactory;

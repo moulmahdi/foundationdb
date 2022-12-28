@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,16 +46,14 @@ struct HealthMetricsApiWorkload : TestWorkload {
 
 	// internal states
 	bool healthMetricsStoppedUpdating = false;
-	static constexpr const char* NAME = "HealthMetricsApi";
+	static constexpr auto NAME = "HealthMetricsApi";
 
 	HealthMetricsApiWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 120.0);
-		healthMetricsCheckInterval = getOption(options, LiteralStringRef("healthMetricsCheckInterval"), 1.0);
-		sendDetailedHealthMetrics = getOption(options, LiteralStringRef("sendDetailedHealthMetrics"), true);
-		maxAllowedStaleness = getOption(options, LiteralStringRef("maxAllowedStaleness"), 60.0);
+		testDuration = getOption(options, "testDuration"_sr, 120.0);
+		healthMetricsCheckInterval = getOption(options, "healthMetricsCheckInterval"_sr, 1.0);
+		sendDetailedHealthMetrics = getOption(options, "sendDetailedHealthMetrics"_sr, true);
+		maxAllowedStaleness = getOption(options, "maxAllowedStaleness"_sr, 60.0);
 	}
-
-	std::string description() const override { return HealthMetricsApiWorkload::NAME; }
 
 	ACTOR static Future<Void> _setup(Database cx, HealthMetricsApiWorkload* self) {
 		if (!self->sendDetailedHealthMetrics) {
@@ -107,15 +105,15 @@ struct HealthMetricsApiWorkload : TestWorkload {
 		return correctHealthMetricsState;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
-		m.push_back(PerfMetric("WorstStorageQueue", worstStorageQueue, true));
-		m.push_back(PerfMetric("DetailedWorstStorageQueue", detailedWorstStorageQueue, true));
-		m.push_back(PerfMetric("WorstStorageDurabilityLag", worstStorageDurabilityLag, true));
-		m.push_back(PerfMetric("DetailedWorstStorageDurabilityLag", detailedWorstStorageDurabilityLag, true));
-		m.push_back(PerfMetric("WorstTLogQueue", worstTLogQueue, true));
-		m.push_back(PerfMetric("DetailedWorstTLogQueue", detailedWorstTLogQueue, true));
-		m.push_back(PerfMetric("DetailedWorstCpuUsage", detailedWorstCpuUsage, true));
-		m.push_back(PerfMetric("DetailedWorstDiskUsage", detailedWorstDiskUsage, true));
+	void getMetrics(std::vector<PerfMetric>& m) override {
+		m.emplace_back("WorstStorageQueue", worstStorageQueue, Averaged::True);
+		m.emplace_back("DetailedWorstStorageQueue", detailedWorstStorageQueue, Averaged::True);
+		m.emplace_back("WorstStorageDurabilityLag", worstStorageDurabilityLag, Averaged::True);
+		m.emplace_back("DetailedWorstStorageDurabilityLag", detailedWorstStorageDurabilityLag, Averaged::True);
+		m.emplace_back("WorstTLogQueue", worstTLogQueue, Averaged::True);
+		m.emplace_back("DetailedWorstTLogQueue", detailedWorstTLogQueue, Averaged::True);
+		m.emplace_back("DetailedWorstCpuUsage", detailedWorstCpuUsage, Averaged::True);
+		m.emplace_back("DetailedWorstDiskUsage", detailedWorstDiskUsage, Averaged::True);
 	}
 
 	ACTOR static Future<Void> healthMetricsChecker(Database cx, HealthMetricsApiWorkload* self) {
@@ -176,4 +174,4 @@ struct HealthMetricsApiWorkload : TestWorkload {
 		};
 	}
 };
-WorkloadFactory<HealthMetricsApiWorkload> HealthMetricsApiWorkloadFactory(HealthMetricsApiWorkload::NAME);
+WorkloadFactory<HealthMetricsApiWorkload> HealthMetricsApiWorkloadFactory;

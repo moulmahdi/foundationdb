@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,23 +25,36 @@
 #include "fdbserver/Knobs.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "fdbrpc/simulator.h"
+#include "fdbserver/QuietDatabase.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 // "ssd" is an alias to the preferred type which skews the random distribution toward it but that's okay.
 static const char* storeTypes[] = {
 	"ssd", "ssd-1", "ssd-2", "memory", "memory-1", "memory-2", "memory-radixtree-beta"
 };
-static const char* logTypes[] = { "log_engine:=1",  "log_engine:=2",  "log_spill:=1",
-	                              "log_spill:=2",   "log_version:=2", "log_version:=3",
-	                              "log_version:=4", "log_version:=5", "log_version:=6" };
+static const char* storageMigrationTypes[] = { "perpetual_storage_wiggle=0 storage_migration_type=aggressive",
+	                                           "perpetual_storage_wiggle=1",
+	                                           "perpetual_storage_wiggle=1 storage_migration_type=gradual",
+	                                           "storage_migration_type=aggressive" };
+static const char* logTypes[] = { "log_engine:=1",
+	                              "log_engine:=2",
+	                              "log_spill:=1",
+	                              "log_spill:=2",
+	                              "log_version:=2",
+	                              "log_version:=3",
+	                              "log_version:=4",
+	                              "log_version:=5",
+	                              "log_version:=6",
+	                              // downgrade incompatible log version
+	                              "log_version:=7" };
 static const char* redundancies[] = { "single", "double", "triple" };
 static const char* backupTypes[] = { "backup_worker_enabled:=0", "backup_worker_enabled:=1" };
 
 std::string generateRegions() {
 	std::string result;
-	if (g_simulator.physicalDatacenters == 1 ||
-	    (g_simulator.physicalDatacenters == 2 && deterministicRandom()->random01() < 0.25) ||
-	    g_simulator.physicalDatacenters == 3) {
+	if (g_simulator->physicalDatacenters == 1 ||
+	    (g_simulator->physicalDatacenters == 2 && deterministicRandom()->random01() < 0.25) ||
+	    g_simulator->physicalDatacenters == 3) {
 		return " usable_regions=1 regions=\"\"";
 	}
 
@@ -74,7 +87,7 @@ std::string generateRegions() {
 	StatusArray remoteDcArr;
 	remoteDcArr.push_back(remoteDcObj);
 
-	if (g_simulator.physicalDatacenters > 3 && deterministicRandom()->random01() < 0.5) {
+	if (g_simulator->physicalDatacenters > 3 && deterministicRandom()->random01() < 0.5) {
 		StatusObject primarySatelliteObj;
 		primarySatelliteObj["id"] = "2";
 		primarySatelliteObj["priority"] = 1;
@@ -91,7 +104,7 @@ std::string generateRegions() {
 			remoteSatelliteObj["satellite_logs"] = deterministicRandom()->randomInt(1, 7);
 		remoteDcArr.push_back(remoteSatelliteObj);
 
-		if (g_simulator.physicalDatacenters > 5 && deterministicRandom()->random01() < 0.5) {
+		if (g_simulator->physicalDatacenters > 5 && deterministicRandom()->random01() < 0.5) {
 			StatusObject primarySatelliteObjB;
 			primarySatelliteObjB["id"] = "4";
 			primarySatelliteObjB["priority"] = 1;
@@ -111,17 +124,17 @@ std::string generateRegions() {
 			int satellite_replication_type = deterministicRandom()->randomInt(0, 3);
 			switch (satellite_replication_type) {
 			case 0: {
-				TEST(true); // Simulated cluster using no satellite redundancy mode
+				CODE_PROBE(true, "Simulated cluster using no satellite redundancy mode");
 				break;
 			}
 			case 1: {
-				TEST(true); // Simulated cluster using two satellite fast redundancy mode
+				CODE_PROBE(true, "Simulated cluster using two satellite fast redundancy mode");
 				primaryObj["satellite_redundancy_mode"] = "two_satellite_fast";
 				remoteObj["satellite_redundancy_mode"] = "two_satellite_fast";
 				break;
 			}
 			case 2: {
-				TEST(true); // Simulated cluster using two satellite safe redundancy mode
+				CODE_PROBE(true, "Simulated cluster using two satellite safe redundancy mode");
 				primaryObj["satellite_redundancy_mode"] = "two_satellite_safe";
 				remoteObj["satellite_redundancy_mode"] = "two_satellite_safe";
 				break;
@@ -134,21 +147,21 @@ std::string generateRegions() {
 			switch (satellite_replication_type) {
 			case 0: {
 				// FIXME: implement
-				TEST(true); // Simulated cluster using custom satellite redundancy mode
+				CODE_PROBE(true, "Simulated cluster using custom satellite redundancy mode");
 				break;
 			}
 			case 1: {
-				TEST(true); // Simulated cluster using no satellite redundancy mode (<5 datacenters)
+				CODE_PROBE(true, "Simulated cluster using no satellite redundancy mode (<5 datacenters)");
 				break;
 			}
 			case 2: {
-				TEST(true); // Simulated cluster using single satellite redundancy mode
+				CODE_PROBE(true, "Simulated cluster using single satellite redundancy mode");
 				primaryObj["satellite_redundancy_mode"] = "one_satellite_single";
 				remoteObj["satellite_redundancy_mode"] = "one_satellite_single";
 				break;
 			}
 			case 3: {
-				TEST(true); // Simulated cluster using double satellite redundancy mode
+				CODE_PROBE(true, "Simulated cluster using double satellite redundancy mode");
 				primaryObj["satellite_redundancy_mode"] = "one_satellite_double";
 				remoteObj["satellite_redundancy_mode"] = "one_satellite_double";
 				break;
@@ -167,20 +180,20 @@ std::string generateRegions() {
 		switch (remote_replication_type) {
 		case 0: {
 			// FIXME: implement
-			TEST(true); // Simulated cluster using custom remote redundancy mode
+			CODE_PROBE(true, "Simulated cluster using custom remote redundancy mode");
 			break;
 		}
 		case 1: {
-			TEST(true); // Simulated cluster using default remote redundancy mode
+			CODE_PROBE(true, "Simulated cluster using default remote redundancy mode");
 			break;
 		}
 		case 2: {
-			TEST(true); // Simulated cluster using single remote redundancy mode
+			CODE_PROBE(true, "Simulated cluster using single remote redundancy mode");
 			result += " remote_single";
 			break;
 		}
 		case 3: {
-			TEST(true); // Simulated cluster using double remote redundancy mode
+			CODE_PROBE(true, "Simulated cluster using double remote redundancy mode");
 			result += " remote_double";
 			break;
 		}
@@ -211,28 +224,37 @@ std::string generateRegions() {
 }
 
 struct ConfigureDatabaseWorkload : TestWorkload {
+	static constexpr auto NAME = "ConfigureDatabase";
 	double testDuration;
 	int additionalDBs;
 	bool allowDescriptorChange;
-	vector<Future<Void>> clients;
+	bool allowTestStorageMigration; // allow change storage migration and perpetual wiggle conf
+	bool storageMigrationCompatibleConf; // only allow generating configuration suitable for storage migration test
+	bool waitStoreTypeCheck;
+	bool downgradeTest1; // if this is true, don't pick up downgrade incompatible config
+	std::vector<Future<Void>> clients;
 	PerfIntCounter retries;
 
 	ConfigureDatabaseWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), retries("Retries") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 200.0);
+		testDuration = getOption(options, "testDuration"_sr, 200.0);
 		allowDescriptorChange =
-		    getOption(options, LiteralStringRef("allowDescriptorChange"), SERVER_KNOBS->ENABLE_CROSS_CLUSTER_SUPPORT);
-
-		g_simulator.usableRegions = 1;
+		    getOption(options, "allowDescriptorChange"_sr, SERVER_KNOBS->ENABLE_CROSS_CLUSTER_SUPPORT);
+		allowTestStorageMigration =
+		    getOption(options, "allowTestStorageMigration"_sr, false) && g_simulator->allowStorageMigrationTypeChange;
+		storageMigrationCompatibleConf = getOption(options, "storageMigrationCompatibleConf"_sr, false);
+		waitStoreTypeCheck = getOption(options, "waitStoreTypeCheck"_sr, false);
+		downgradeTest1 = getOption(options, "downgradeTest1"_sr, false);
+		g_simulator->usableRegions = 1;
 	}
 
-	std::string description() const override { return "DestroyDatabaseWorkload"; }
+	void disableFailureInjectionWorkloads(std::set<std::string>& out) const override { out.insert("Attrition"); }
 
 	Future<Void> setup(Database const& cx) override { return _setup(cx, this); }
 
 	Future<Void> start(Database const& cx) override { return _start(this, cx); }
-	Future<bool> check(Database const& cx) override { return true; }
+	Future<bool> check(Database const& cx) override { return _check(this, cx); }
 
-	void getMetrics(vector<PerfMetric>& m) override { m.push_back(retries.getMetric()); }
+	void getMetrics(std::vector<PerfMetric>& m) override { m.push_back(retries.getMetric()); }
 
 	static inline uint64_t valueToUInt64(const StringRef& v) {
 		long long unsigned int x = 0;
@@ -246,11 +268,11 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 
 	static Future<ConfigurationResult> IssueConfigurationChange(Database cx, const std::string& config, bool force) {
 		printf("Issuing configuration change: %s\n", config.c_str());
-		return changeConfig(cx, config, force);
+		return ManagementAPI::changeConfig(cx.getReference(), config, force);
 	}
 
 	ACTOR Future<Void> _setup(Database cx, ConfigureDatabaseWorkload* self) {
-		wait(success(changeConfig(cx, "single", true)));
+		wait(success(ManagementAPI::changeConfig(cx.getReference(), "single storage_migration_type=aggressive", true)));
 		return Void();
 	}
 
@@ -262,6 +284,62 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 		return Void();
 	}
 
+	ACTOR Future<bool> _check(ConfigureDatabaseWorkload* self, Database cx) {
+		wait(delay(30.0));
+		// only storage_migration_type=gradual && perpetual_storage_wiggle=1 need this check because in QuietDatabase
+		// perpetual wiggle will be forced to close For other cases, later ConsistencyCheck will check KV store type
+		// there
+		if (self->allowTestStorageMigration || self->waitStoreTypeCheck) {
+			loop {
+				// There exists a race where the check can start before the last transaction that singleDB issued
+				// finishes, if singleDB gets actor cancelled from a timeout at the end of a test. This means the
+				// configuration needs to be re-read in case it changed since the last loop, since it could
+				// read a stale storage engine type from the configuration initially.
+				state DatabaseConfiguration conf = wait(getDatabaseConfiguration(cx));
+
+				state std::string wiggleLocalityKeyValue = conf.perpetualStorageWiggleLocality;
+				state std::string wiggleLocalityKey;
+				state std::string wiggleLocalityValue;
+				state int i;
+				if (wiggleLocalityKeyValue != "0") {
+					int split = wiggleLocalityKeyValue.find(':');
+					wiggleLocalityKey = wiggleLocalityKeyValue.substr(0, split);
+					wiggleLocalityValue = wiggleLocalityKeyValue.substr(split + 1);
+				}
+
+				state bool pass = true;
+				state std::vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+
+				for (i = 0; i < storageServers.size(); i++) {
+					// Check that each storage server has the correct key value store type
+					if (!storageServers[i].isTss() &&
+					    (wiggleLocalityKeyValue == "0" ||
+					     (storageServers[i].locality.get(wiggleLocalityKey).present() &&
+					      storageServers[i].locality.get(wiggleLocalityKey).get().toString() == wiggleLocalityValue))) {
+						ReplyPromise<KeyValueStoreType> typeReply;
+						ErrorOr<KeyValueStoreType> keyValueStoreType =
+						    wait(storageServers[i].getKeyValueStoreType.getReplyUnlessFailedFor(typeReply, 2, 0));
+						if (keyValueStoreType.present() && keyValueStoreType.get() != conf.storageServerStoreType) {
+							TraceEvent(SevWarn, "ConfigureDatabase_WrongStoreType")
+							    .suppressFor(5.0)
+							    .detail("ServerID", storageServers[i].id())
+							    .detail("ProcessID", storageServers[i].locality.processId())
+							    .detail("ServerStoreType",
+							            keyValueStoreType.present() ? keyValueStoreType.get().toString() : "?")
+							    .detail("ConfigStoreType", conf.storageServerStoreType.toString());
+							pass = false;
+							break;
+						}
+					}
+				}
+				if (pass)
+					break;
+				wait(delay(g_network->isSimulated() ? 2.0 : 30.0));
+			}
+		}
+		return true;
+	}
+
 	static int randomRoleNumber() {
 		int i = deterministicRandom()->randomInt(0, 4);
 		return i ? i : -1;
@@ -270,15 +348,23 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 	ACTOR Future<Void> singleDB(ConfigureDatabaseWorkload* self, Database cx) {
 		state Transaction tr;
 		loop {
-			if (g_simulator.speedUpSimulation) {
+			if (g_simulator->speedUpSimulation) {
 				return Void();
 			}
-			state int randomChoice = deterministicRandom()->randomInt(0, 8);
-
+			state int randomChoice;
+			if (self->allowTestStorageMigration) {
+				randomChoice = (deterministicRandom()->random01() < 0.375) ? deterministicRandom()->randomInt(0, 3)
+				                                                           : deterministicRandom()->randomInt(4, 9);
+			} else if (self->storageMigrationCompatibleConf) {
+				randomChoice = (deterministicRandom()->random01() < 3.0 / 7) ? deterministicRandom()->randomInt(0, 3)
+				                                                             : deterministicRandom()->randomInt(4, 8);
+			} else {
+				randomChoice = deterministicRandom()->randomInt(0, 8);
+			}
 			if (randomChoice == 0) {
 				wait(success(
 				    runRYWTransaction(cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Optional<Value>> {
-					    return tr->get(LiteralStringRef("This read is only to ensure that the database recovered"));
+					    return tr->get("This read is only to ensure that the database recovered"_sr);
 				    })));
 				wait(delay(20 + 10 * deterministicRandom()->random01()));
 			} else if (randomChoice < 3) {
@@ -288,14 +374,14 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 			} else if (randomChoice == 3) {
 				//TraceEvent("ConfigureTestConfigureBegin").detail("NewConfig", newConfig);
 				int maxRedundancies = sizeof(redundancies) / sizeof(redundancies[0]);
-				if (g_simulator.physicalDatacenters == 2 || g_simulator.physicalDatacenters > 3) {
+				if (g_simulator->physicalDatacenters == 2 || g_simulator->physicalDatacenters > 3) {
 					maxRedundancies--; // There are not enough machines for triple replication in fearless
 					                   // configurations
 				}
 				int redundancy = deterministicRandom()->randomInt(0, maxRedundancies);
 				std::string config = redundancies[redundancy];
 
-				if (config == "triple" && g_simulator.physicalDatacenters == 3) {
+				if (config == "triple" && g_simulator->physicalDatacenters == 3) {
 					config = "three_data_hall ";
 				}
 
@@ -338,13 +424,50 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 				    true)));
 			} else if (randomChoice == 6) {
 				// Some configurations will be invalid, and that's fine.
-				wait(success(IssueConfigurationChange(
-				    cx, logTypes[deterministicRandom()->randomInt(0, sizeof(logTypes) / sizeof(logTypes[0]))], false)));
+				int length = sizeof(logTypes) / sizeof(logTypes[0]);
+
+				if (self->downgradeTest1) {
+					length -= 1;
+				}
+
+				wait(success(
+				    IssueConfigurationChange(cx, logTypes[deterministicRandom()->randomInt(0, length)], false)));
 			} else if (randomChoice == 7) {
 				wait(success(IssueConfigurationChange(
 				    cx,
 				    backupTypes[deterministicRandom()->randomInt(0, sizeof(backupTypes) / sizeof(backupTypes[0]))],
 				    false)));
+			} else if (randomChoice == 8) {
+				if (self->allowTestStorageMigration) {
+					CODE_PROBE(true, "storage migration type change");
+
+					// randomly configuring perpetual_storage_wiggle_locality
+					state std::string randomPerpetualWiggleLocality;
+					if (deterministicRandom()->random01() < 0.25) {
+						state std::vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+						StorageServerInterface randomSS =
+						    storageServers[deterministicRandom()->randomInt(0, storageServers.size())];
+						std::vector<StringRef> localityKeys = { LocalityData::keyDcId,
+							                                    LocalityData::keyDataHallId,
+							                                    LocalityData::keyZoneId,
+							                                    LocalityData::keyMachineId,
+							                                    LocalityData::keyProcessId };
+						StringRef randomLocalityKey =
+						    localityKeys[deterministicRandom()->randomInt(0, localityKeys.size())];
+						if (randomSS.locality.isPresent(randomLocalityKey)) {
+							randomPerpetualWiggleLocality =
+							    " perpetual_storage_wiggle_locality=" + randomLocalityKey.toString() + ":" +
+							    randomSS.locality.get(randomLocalityKey).get().toString();
+						}
+					}
+
+					wait(success(IssueConfigurationChange(
+					    cx,
+					    storageMigrationTypes[deterministicRandom()->randomInt(
+					        0, sizeof(storageMigrationTypes) / sizeof(storageMigrationTypes[0]))] +
+					        randomPerpetualWiggleLocality,
+					    false)));
+				}
 			} else {
 				ASSERT(false);
 			}
@@ -352,4 +475,4 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<ConfigureDatabaseWorkload> DestroyDatabaseWorkloadFactory("ConfigureDatabase");
+WorkloadFactory<ConfigureDatabaseWorkload> DestroyDatabaseWorkloadFactory;

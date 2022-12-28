@@ -38,8 +38,12 @@ Arguments
   | - ``build``:  Populate data
   | - ``run``:  Run the benchmark
 
-- | ``-c | --cluster <cluster file>``
-  | FDB cluster file (Required)
+- | ``-c | --cluster <cluster_file>``
+  | FDB cluster files (Required, comma-separated)
+
+- | ``-d | --num_databases <num_databases>``
+  | Number of database objects (Default: 1)
+  | If more than 1 cluster is provided, this value should be >= number of cluster
 
 - | ``-a | --api_version <api_version>``
   | FDB API version to use (Default: Latest)
@@ -49,6 +53,13 @@ Arguments
 
 - | ``-t | --threads <threads>``
   | Number of threads per worker process (Default: 1)
+  | With ``--async_xacts <xacts>`` == 0 (Default), each of the ``<threads>`` operates on a transaction object with blocking API calls
+  | Otherwise, all of the ``<threads>`` run an asynchronous job scheduler, serving ``<xacts>`` transactions
+
+- | ``--async_xacts <xacts>``
+  | Number of transactions per worker process to run asynchronously (Default: 0)
+  | ``<xacts>`` > 0 switches the execution mode to non-blocking (See ``-t | --threads``), with the exception of blob granules API
+  | Note: throttling options, e.g. ``--tpsmax``, ``--tpsmin``, ``--tpschange``, ``--tpsinterval``, are ignored in asynchronous mode
 
 - | ``-r | --rows <rows>``
   | Number of rows initially populated (Default: 100000)
@@ -110,6 +121,31 @@ Arguments
   | - 2 – Annoying
   | - 3 – Very Annoying (a.k.a. DEBUG)
 
+- | ``--disable_ryw``
+  | Disable snapshot read-your-writes
+
+- | ``--json_report`` defaults to ``mako.json``
+  | ``--json_report <path>``
+  | Output stats to the specified json file
+
+- | ``--tls_certificate_file <path>``
+  | Use TLS certificate located in ``<path>``
+
+- | ``--tls_key_file <path>``
+  | Use TLS key file located in ``<path>``
+
+- | ``--tls_ca_file <path>``
+  | Use TLS CA file located in ``<path>``
+
+- | ``--authorization_token_file <path>``
+  | Use authorization token JSON file located in ``<path>``
+  | Expected content is a JSON object where each key is a tenant name and the mapped value is a token string
+
+- | ``--transaction_timeout_tx <duration>``
+  | Duration in milliseconds after which a transaction times out in run mode. Set as transaction option.
+
+- | ``--transaction_timeout_db <duration>``
+  | Duration in milliseconds after which a transaction times out in run mode. Set as database option.
 
 Transaction Specification
 =========================
@@ -127,6 +163,7 @@ Operation Types
 - ``u`` – Update (= GET followed by SET)
 - ``i`` – Insert (= SET with a new key)
 - ``ir`` – Insert Range (Sequential)
+- ``o`` – Overwrite (Blind write to existing keys)
 - ``c`` – CLEAR
 - ``sc`` – SET & CLEAR
 - ``cr`` – CLEAR RANGE
@@ -137,7 +174,7 @@ Format
 ------
 | One operation type is defined as ``<Type><Count>`` or ``<Type><Count>:<Range>``.
 | When Count is omitted, it's equivalent to setting it to 1.  (e.g. ``g`` is equivalent to ``g1``)
-| Multiple operation types within the same trancaction can be concatenated.  (e.g. ``g9u1`` = 9 GETs and 1 update)
+| Multiple operation types within the same transaction can be concatenated.  (e.g. ``g9u1`` = 9 GETs and 1 update)
 
 Transaction Specification Examples
 ----------------------------------

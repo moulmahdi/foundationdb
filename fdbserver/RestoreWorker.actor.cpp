@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,8 @@
 #include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/MutationList.h"
 #include "fdbclient/BackupContainer.h"
-#include "fdbrpc/IAsyncFile.h"
+#include "flow/ApiVersion.h"
+#include "flow/IAsyncFile.h"
 #include "fdbrpc/simulator.h"
 #include "flow/genericactors.actor.h"
 #include "flow/Hash3.h"
@@ -144,7 +145,7 @@ void handleRecruitRoleRequest(RestoreRecruitRoleRequest req,
 // This is done before we assign restore roles for restore workers.
 ACTOR Future<Void> collectRestoreWorkerInterface(Reference<RestoreWorkerData> self, Database cx, int min_num_workers) {
 	state Transaction tr(cx);
-	state vector<RestoreWorkerInterface> agents; // agents is cmdsInterf
+	state std::vector<RestoreWorkerInterface> agents; // agents is cmdsInterf
 
 	loop {
 		try {
@@ -264,7 +265,7 @@ ACTOR Future<Void> startRestoreWorker(Reference<RestoreWorkerData> self, Restore
 				}
 			}
 		} catch (Error& e) {
-			TraceEvent(SevWarn, "FastRestoreWorkerError").detail("RequestType", requestTypeStr).error(e, true);
+			TraceEvent(SevWarn, "FastRestoreWorkerError").errorUnsuppressed(e).detail("RequestType", requestTypeStr);
 			break;
 		}
 	}
@@ -365,13 +366,13 @@ ACTOR Future<Void> _restoreWorker(Database cx, LocalityData locality) {
 	// Protect restore worker from being killed in simulation;
 	// Future: Remove the protection once restore can tolerate failure
 	if (g_network->isSimulated()) {
-		auto addresses = g_simulator.getProcessByAddress(myWorkerInterf.address())->addresses;
+		auto addresses = g_simulator->getProcessByAddress(myWorkerInterf.address())->addresses;
 
-		g_simulator.protectedAddresses.insert(addresses.address);
+		g_simulator->protectedAddresses.insert(addresses.address);
 		if (addresses.secondaryAddress.present()) {
-			g_simulator.protectedAddresses.insert(addresses.secondaryAddress.get());
+			g_simulator->protectedAddresses.insert(addresses.secondaryAddress.get());
 		}
-		ISimulator::ProcessInfo* p = g_simulator.getProcessByAddress(myWorkerInterf.address());
+		ISimulator::ProcessInfo* p = g_simulator->getProcessByAddress(myWorkerInterf.address());
 		TraceEvent("ProtectRestoreWorker")
 		    .detail("Address", addresses.toString())
 		    .detail("IsReliable", p->isReliable())
@@ -406,11 +407,11 @@ ACTOR Future<Void> _restoreWorker(Database cx, LocalityData locality) {
 	return Void();
 }
 
-ACTOR Future<Void> restoreWorker(Reference<ClusterConnectionFile> connFile,
+ACTOR Future<Void> restoreWorker(Reference<IClusterConnectionRecord> connRecord,
                                  LocalityData locality,
                                  std::string coordFolder) {
 	try {
-		Database cx = Database::createDatabase(connFile, Database::API_VERSION_LATEST, IsInternal::True, locality);
+		Database cx = Database::createDatabase(connRecord, ApiVersion::LATEST_VERSION, IsInternal::True, locality);
 		wait(reportErrors(_restoreWorker(cx, locality), "RestoreWorker"));
 	} catch (Error& e) {
 		TraceEvent("FastRestoreWorker").detail("Error", e.what());

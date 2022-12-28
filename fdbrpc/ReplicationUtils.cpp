@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -493,10 +493,10 @@ Reference<LocalitySet> createTestLocalityMap(std::vector<repTestType>& indexes,
 					serverValue = dcLoop + szLoop * 10 + rackLoop * 100 + slotLoop * 1000;
 					slotText = format(".%d", slotLoop);
 					LocalityData data;
-					data.set(LiteralStringRef("dc"), StringRef(dcText));
-					data.set(LiteralStringRef("sz"), StringRef(dcText + szText));
-					data.set(LiteralStringRef("rack"), StringRef(dcText + szText + rackText));
-					data.set(LiteralStringRef("zoneid"), StringRef(dcText + szText + rackText + slotText));
+					data.set("dc"_sr, StringRef(dcText));
+					data.set("sz"_sr, StringRef(dcText + szText));
+					data.set("rack"_sr, StringRef(dcText + szText + rackText));
+					data.set("zoneid"_sr, StringRef(dcText + szText + rackText + slotText));
 					for (int independentLoop = 0; independentLoop < independentItems; independentLoop++) {
 						independentName = format("indiv%02d", independentLoop + 1);
 						for (int totalLoop = 0; totalLoop < independentTotal; totalLoop++) {
@@ -520,10 +520,10 @@ Reference<LocalitySet> createTestLocalityMap(std::vector<repTestType>& indexes,
 					serverValue = (dcLoop + 2) + szLoop * 10 + rackLoop * 100 + slotLoop * 1000;
 					slotText = format(".%d", slotLoop);
 					LocalityData data;
-					data.set(LiteralStringRef("dc"), StringRef(dcText));
-					data.set(LiteralStringRef("az"), StringRef(dcText + szText));
-					data.set(LiteralStringRef("rack"), StringRef(dcText + szText + rackText));
-					data.set(LiteralStringRef("zoneid"), StringRef(dcText + szText + rackText + slotText));
+					data.set("dc"_sr, StringRef(dcText));
+					data.set("az"_sr, StringRef(dcText + szText));
+					data.set("rack"_sr, StringRef(dcText + szText + rackText));
+					data.set("zoneid"_sr, StringRef(dcText + szText + rackText + slotText));
 					for (int independentLoop = 0; independentLoop < independentItems; independentLoop++) {
 						independentName = format("indiv%02d", independentLoop);
 						for (int totalLoop = 0; totalLoop < independentTotal; totalLoop++) {

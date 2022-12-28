@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,12 +25,14 @@
 
 static StreamCipher::IV getRandomIV() {
 	StreamCipher::IV iv;
-	generateRandomData(iv.data(), iv.size());
+	deterministicRandom()->randomBytes(iv.data(), iv.size());
 	return iv;
 }
 
-static inline Standalone<StringRef> encrypt(const StreamCipher::Key& key, const StreamCipher::IV& iv,
-                                            unsigned char const* data, size_t len) {
+static inline Standalone<StringRef> encrypt(const StreamCipherKey* const key,
+                                            const StreamCipher::IV& iv,
+                                            unsigned char const* data,
+                                            size_t len) {
 	EncryptionStreamCipher encryptor(key, iv);
 	Arena arena;
 	auto encrypted = encryptor.encrypt(data, len, arena);
@@ -41,11 +43,11 @@ static void bench_encrypt(benchmark::State& state) {
 	auto bytes = state.range(0);
 	auto chunks = state.range(1);
 	auto chunkSize = bytes / chunks;
-	StreamCipher::Key::initializeRandomTestKey();
-	const auto& key = StreamCipher::Key::getKey();
+	StreamCipherKey::initializeGlobalRandomTestKey();
+	auto key = StreamCipherKey::getGlobalCipherKey();
 	auto iv = getRandomIV();
 	auto data = getKey(bytes);
-	while (state.KeepRunning()) {
+	for (auto _ : state) {
 		for (int chunk = 0; chunk < chunks; ++chunk) {
 			benchmark::DoNotOptimize(encrypt(key, iv, data.begin() + chunk * chunkSize, chunkSize));
 		}
@@ -57,12 +59,12 @@ static void bench_decrypt(benchmark::State& state) {
 	auto bytes = state.range(0);
 	auto chunks = state.range(1);
 	auto chunkSize = bytes / chunks;
-	StreamCipher::Key::initializeRandomTestKey();
-	const auto& key = StreamCipher::Key::getKey();
+	StreamCipherKey::initializeGlobalRandomTestKey();
+	auto key = StreamCipherKey::getGlobalCipherKey();
 	auto iv = getRandomIV();
 	auto data = getKey(bytes);
 	auto encrypted = encrypt(key, iv, data.begin(), data.size());
-	while (state.KeepRunning()) {
+	for (auto _ : state) {
 		Arena arena;
 		DecryptionStreamCipher decryptor(key, iv);
 		for (int chunk = 0; chunk < chunks; ++chunk) {

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ ACTOR static Future<Void> produce(ParallelStream<ParallelStreamTest::TestValue>:
 }
 
 ACTOR static Future<Void> consume(FutureStream<ParallelStreamTest::TestValue> stream, int expected) {
-	state int next;
+	state int next = 0;
 	try {
 		loop {
 			ParallelStreamTest::TestValue value = waitNext(stream);
@@ -64,9 +64,7 @@ TEST_CASE("/fdbclient/ParallelStream") {
 	state ParallelStream<ParallelStreamTest::TestValue> parallelStream(results, bufferLimit);
 	state Future<Void> consumer = ParallelStreamTest::consume(results.getFuture(), numProducers);
 	state std::vector<Future<Void>> producers;
-	TraceEvent("StartingParallelStreamTest")
-	    .detail("BufferLimit", bufferLimit)
-	    .detail("NumProducers", numProducers);
+	TraceEvent("StartingParallelStreamTest").detail("BufferLimit", bufferLimit).detail("NumProducers", numProducers);
 	state int i = 0;
 	for (; i < numProducers; ++i) {
 		ParallelStream<ParallelStreamTest::TestValue>::Fragment* fragment = wait(parallelStream.createFragment());

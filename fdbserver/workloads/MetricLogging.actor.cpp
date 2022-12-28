@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "flow/TDMetric.actor.h"
@@ -26,32 +25,31 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct MetricLoggingWorkload : TestWorkload {
+	static constexpr auto NAME = "MetricLogging";
 	int actorCount, metricCount;
 	double testDuration;
 	bool testBool, enabled;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter changes;
 	std::vector<BoolMetricHandle> boolMetrics;
 	std::vector<Int64MetricHandle> int64Metrics;
 
 	MetricLoggingWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), changes("Changes") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		actorCount = getOption(options, LiteralStringRef("actorCount"), 1);
-		metricCount = getOption(options, LiteralStringRef("metricCount"), 1);
-		testBool = getOption(options, LiteralStringRef("testBool"), true);
-		enabled = getOption(options, LiteralStringRef("enabled"), true);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		actorCount = getOption(options, "actorCount"_sr, 1);
+		metricCount = getOption(options, "metricCount"_sr, 1);
+		testBool = getOption(options, "testBool"_sr, true);
+		enabled = getOption(options, "enabled"_sr, true);
 
 		for (int i = 0; i < metricCount; i++) {
 			if (testBool) {
-				boolMetrics.push_back(BoolMetricHandle(LiteralStringRef("TestBool"), format("%d", i)));
+				boolMetrics.push_back(BoolMetricHandle("TestBool"_sr, format("%d", i)));
 			} else {
-				int64Metrics.push_back(Int64MetricHandle(LiteralStringRef("TestInt"), format("%d", i)));
+				int64Metrics.push_back(Int64MetricHandle("TestInt"_sr, format("%d", i)));
 			}
 		}
 	}
-
-	std::string description() const override { return "MetricLogging"; }
 
 	Future<Void> setup(Database const& cx) override { return _setup(this, cx); }
 
@@ -78,9 +76,9 @@ struct MetricLoggingWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(changes.getMetric());
-		m.push_back(PerfMetric("Changes/sec", changes.getValue() / testDuration, false));
+		m.emplace_back("Changes/sec", changes.getValue() / testDuration, Averaged::False);
 	}
 
 	ACTOR Future<Void> MetricLoggingClient(Database cx, MetricLoggingWorkload* self, int clientId, int actorId) {
@@ -99,4 +97,4 @@ struct MetricLoggingWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<MetricLoggingWorkload> MetricLoggingWorkloadFactory("MetricLogging");
+WorkloadFactory<MetricLoggingWorkload> MetricLoggingWorkloadFactory;

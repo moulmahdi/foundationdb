@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,8 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct StatusWorkload : TestWorkload {
+	static constexpr auto NAME = "Status";
+
 	double testDuration, requestsPerSecond;
 	bool enableLatencyBands;
 
@@ -39,11 +41,10 @@ struct StatusWorkload : TestWorkload {
 	StatusWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), requests("Status requests issued"), replies("Status replies received"),
 	    errors("Status Errors"), totalSize("Status reply size sum") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		requestsPerSecond = getOption(options, LiteralStringRef("requestsPerSecond"), 0.5);
-		enableLatencyBands =
-		    getOption(options, LiteralStringRef("enableLatencyBands"), deterministicRandom()->random01() < 0.5);
-		auto statusSchemaStr = getOption(options, LiteralStringRef("schema"), JSONSchemas::statusSchema);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		requestsPerSecond = getOption(options, "requestsPerSecond"_sr, 0.5);
+		enableLatencyBands = getOption(options, "enableLatencyBands"_sr, deterministicRandom()->random01() < 0.5);
+		auto statusSchemaStr = getOption(options, "schema"_sr, JSONSchemas::statusSchema);
 		if (statusSchemaStr.size()) {
 			json_spirit::mValue schema = readJSONStrictly(statusSchemaStr.toString());
 			parsedSchema = schema.get_obj();
@@ -53,7 +54,6 @@ struct StatusWorkload : TestWorkload {
 		}
 	}
 
-	std::string description() const override { return "StatusWorkload"; }
 	Future<Void> setup(Database const& cx) override {
 		if (enableLatencyBands) {
 			latencyBandActor = configureLatencyBands(this, cx);
@@ -69,14 +69,14 @@ struct StatusWorkload : TestWorkload {
 	}
 	Future<bool> check(Database const& cx) override { return errors.getValue() == 0; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (clientId != 0)
 			return;
 
 		m.push_back(requests.getMetric());
 		m.push_back(replies.getMetric());
-		m.push_back(PerfMetric(
-		    "Average Reply Size", replies.getValue() ? totalSize.getValue() / replies.getValue() : 0, false));
+		m.emplace_back(
+		    "Average Reply Size", replies.getValue() ? totalSize.getValue() / replies.getValue() : 0, Averaged::False);
 		m.push_back(errors.getMetric());
 	}
 
@@ -88,7 +88,8 @@ struct StatusWorkload : TestWorkload {
 				schemaCoverage(spath, false);
 
 				if (skv.second.type() == json_spirit::array_type && skv.second.get_array().size()) {
-					schemaCoverageRequirements(skv.second.get_array()[0].get_obj(), spath + "[0]");
+					if (skv.second.get_array()[0].type() != json_spirit::str_type)
+						schemaCoverageRequirements(skv.second.get_array()[0].get_obj(), spath + "[0]");
 				} else if (skv.second.type() == json_spirit::obj_type) {
 					if (skv.second.get_obj().count("$enum")) {
 						for (auto& enum_item : skv.second.get_obj().at("$enum").get_array())
@@ -187,9 +188,11 @@ struct StatusWorkload : TestWorkload {
 				            now() - issued); //.detail("Reply", json_spirit::write_string(json_spirit::mValue(result)));
 				std::string errorStr;
 				if (self->parsedSchema.present() &&
-				    !schemaMatch(self->parsedSchema.get(), result, errorStr, SevError, true))
+				    !schemaMatch(self->parsedSchema.get(), result, errorStr, SevError, true)) {
+					std::cout << errorStr << std::endl;
 					TraceEvent(SevError, "StatusWorkloadValidationFailed")
 					    .detail("JSON", json_spirit::write_string(json_spirit::mValue(result)));
+				}
 			} catch (Error& e) {
 				if (e.code() != error_code_actor_cancelled) {
 					TraceEvent(SevError, "StatusWorkloadError").error(e);
@@ -201,7 +204,7 @@ struct StatusWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<StatusWorkload> StatusWorkloadFactory("Status");
+WorkloadFactory<StatusWorkload> StatusWorkloadFactory;
 
 TEST_CASE("/fdbserver/status/schema/basic") {
 	json_spirit::mValue schema =

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@
  */
 #include <vector>
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
@@ -28,6 +28,8 @@
 const int keyBytes = 16;
 
 struct QueuePushWorkload : TestWorkload {
+	static constexpr auto NAME = "QueuePush";
+
 	int actorCount, valueBytes;
 	double testDuration;
 	bool forward;
@@ -36,23 +38,22 @@ struct QueuePushWorkload : TestWorkload {
 
 	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, retries;
-	ContinuousSample<double> commitLatencies, GRVLatencies;
+	DDSketch<double> commitLatencies, GRVLatencies;
 
 	QueuePushWorkload(WorkloadContext const& wcx)
-	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries"), commitLatencies(2000), GRVLatencies(2000) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		actorCount = getOption(options, LiteralStringRef("actorCount"), 50);
+	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries"), commitLatencies(), GRVLatencies() {
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		actorCount = getOption(options, "actorCount"_sr, 50);
 
-		valueBytes = getOption(options, LiteralStringRef("valueBytes"), 96);
+		valueBytes = getOption(options, "valueBytes"_sr, 96);
 		valueString = std::string(valueBytes, 'x');
 
-		forward = getOption(options, LiteralStringRef("forward"), true);
+		forward = getOption(options, "forward"_sr, true);
 
-		endingKey = LiteralStringRef("9999999900000001");
-		startingKey = LiteralStringRef("0000000000000001");
+		endingKey = "9999999900000001"_sr;
+		startingKey = "0000000000000001"_sr;
 	}
 
-	std::string description() const override { return "QueuePush"; }
 	Future<Void> start(Database const& cx) override { return _start(cx, this); }
 
 	Future<bool> check(Database const& cx) override { return true; }
@@ -60,22 +61,22 @@ struct QueuePushWorkload : TestWorkload {
 	void getMetrics(std::vector<PerfMetric>& m) override {
 		double duration = testDuration;
 		int writes = transactions.getValue();
-		m.emplace_back("Measured Duration", duration, true);
-		m.emplace_back("Operations/sec", writes / duration, false);
+		m.emplace_back("Measured Duration", duration, Averaged::True);
+		m.emplace_back("Operations/sec", writes / duration, Averaged::False);
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
 
-		m.emplace_back("Mean GRV Latency (ms)", 1000 * GRVLatencies.mean(), true);
-		m.emplace_back("Median GRV Latency (ms, averaged)", 1000 * GRVLatencies.median(), true);
-		m.emplace_back("90% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.90), true);
-		m.emplace_back("98% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.98), true);
+		m.emplace_back("Mean GRV Latency (ms)", 1000 * GRVLatencies.mean(), Averaged::True);
+		m.emplace_back("Median GRV Latency (ms, averaged)", 1000 * GRVLatencies.median(), Averaged::True);
+		m.emplace_back("90% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.98), Averaged::True);
 
-		m.emplace_back("Mean Commit Latency (ms)", 1000 * commitLatencies.mean(), true);
-		m.emplace_back("Median Commit Latency (ms, averaged)", 1000 * commitLatencies.median(), true);
-		m.emplace_back("90% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.90), true);
-		m.emplace_back("98% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.98), true);
+		m.emplace_back("Mean Commit Latency (ms)", 1000 * commitLatencies.mean(), Averaged::True);
+		m.emplace_back("Median Commit Latency (ms, averaged)", 1000 * commitLatencies.median(), Averaged::True);
+		m.emplace_back("90% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.98), Averaged::True);
 
-		m.emplace_back("Bytes written/sec", (writes * (keyBytes + valueBytes)) / duration, false);
+		m.emplace_back("Bytes written/sec", (writes * (keyBytes + valueBytes)) / duration, Averaged::False);
 	}
 
 	static Key keyForIndex(int base, int offset) { return StringRef(format("%08x%08x", base, offset)); }
@@ -149,4 +150,4 @@ struct QueuePushWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<QueuePushWorkload> QueuePushWorkloadFactory("QueuePush");
+WorkloadFactory<QueuePushWorkload> QueuePushWorkloadFactory;

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct GetRangeStream : TestWorkload {
+	static constexpr auto NAME = "GetRangeStream";
 	PerfIntCounter bytesRead;
 	bool useGetRange;
 	Key begin;
@@ -32,13 +33,11 @@ struct GetRangeStream : TestWorkload {
 	bool printKVPairs;
 
 	GetRangeStream(WorkloadContext const& wcx) : TestWorkload(wcx), bytesRead("BytesRead") {
-		useGetRange = getOption(options, LiteralStringRef("useGetRange"), false);
-		begin = getOption(options, LiteralStringRef("begin"), normalKeys.begin);
-		end = getOption(options, LiteralStringRef("end"), normalKeys.end);
-		printKVPairs = getOption(options, LiteralStringRef("printKVPairs"), false);
+		useGetRange = getOption(options, "useGetRange"_sr, false);
+		begin = getOption(options, "begin"_sr, normalKeys.begin);
+		end = getOption(options, "end"_sr, normalKeys.end);
+		printKVPairs = getOption(options, "printKVPairs"_sr, false);
 	}
-
-	std::string description() const override { return "GetRangeStreamWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -48,7 +47,7 @@ struct GetRangeStream : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override { m.push_back(bytesRead.getMetric()); }
+	void getMetrics(std::vector<PerfMetric>& m) override { m.push_back(bytesRead.getMetric()); }
 
 	ACTOR static Future<Void> logThroughput(GetRangeStream* self, Key* next) {
 		loop {
@@ -125,4 +124,4 @@ struct GetRangeStream : TestWorkload {
 	}
 };
 
-WorkloadFactory<GetRangeStream> GetRangeStreamWorkloadFactory("GetRangeStream");
+WorkloadFactory<GetRangeStream> GetRangeStreamWorkloadFactory;

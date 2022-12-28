@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@
 // For this test to report properly buggify must be disabled (flow.h) , and failConnection must be disabled in
 // (sim2.actor.cpp)
 struct ReportConflictingKeysWorkload : TestWorkload {
+	static constexpr auto NAME = "ReportConflictingKeys";
 
 	double testDuration, transactionsPerSecond, addReadConflictRangeProb, addWriteConflictRangeProb;
 	Key keyPrefix;
@@ -40,26 +41,22 @@ struct ReportConflictingKeysWorkload : TestWorkload {
 	ReportConflictingKeysWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), invalidReports("InvalidReports"), commits("commits"), conflicts("Conflicts"),
 	    xacts("Transactions") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		// transactionsPerSecond = getOption(options, LiteralStringRef("transactionsPerSecond"), 5000.0) / clientCount;
-		actorCount = getOption(options, LiteralStringRef("actorsPerClient"), 1);
-		keyPrefix = unprintable(
-		    getOption(options, LiteralStringRef("keyPrefix"), LiteralStringRef("ReportConflictingKeysWorkload"))
-		        .toString());
-		keyBytes = getOption(options, LiteralStringRef("keyBytes"), 64);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		// transactionsPerSecond = getOption(options, "transactionsPerSecond"_sr, 5000.0) / clientCount;
+		actorCount = getOption(options, "actorsPerClient"_sr, 1);
+		keyPrefix = unprintable(getOption(options, "keyPrefix"_sr, "ReportConflictingKeysWorkload"_sr).toString());
+		keyBytes = getOption(options, "keyBytes"_sr, 64);
 
-		readConflictRangeCount = getOption(options, LiteralStringRef("readConflictRangeCountPerTx"), 1);
-		writeConflictRangeCount = getOption(options, LiteralStringRef("writeConflictRangeCountPerTx"), 1);
+		readConflictRangeCount = getOption(options, "readConflictRangeCountPerTx"_sr, 1);
+		writeConflictRangeCount = getOption(options, "writeConflictRangeCountPerTx"_sr, 1);
 		ASSERT(readConflictRangeCount >= 1 && writeConflictRangeCount >= 1);
 		// modeled by geometric distribution: (1 - prob) / prob = mean - 1, where we add at least one conflictRange to
 		// each tx
 		addReadConflictRangeProb = (readConflictRangeCount - 1.0) / readConflictRangeCount;
 		addWriteConflictRangeProb = (writeConflictRangeCount - 1.0) / writeConflictRangeCount;
 		ASSERT(keyPrefix.size() + 8 <= keyBytes); // make sure the string format is valid
-		nodeCount = getOption(options, LiteralStringRef("nodeCount"), 100);
+		nodeCount = getOption(options, "nodeCount"_sr, 100);
 	}
-
-	std::string description() const override { return "ReportConflictingKeysWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -72,14 +69,14 @@ struct ReportConflictingKeysWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return invalidReports.getValue() == 0; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
-		m.push_back(PerfMetric("Measured Duration", testDuration, true));
+	void getMetrics(std::vector<PerfMetric>& m) override {
+		m.emplace_back("Measured Duration", testDuration, Averaged::True);
 		m.push_back(xacts.getMetric());
-		m.push_back(PerfMetric("Transactions/sec", xacts.getValue() / testDuration, true));
+		m.emplace_back("Transactions/sec", xacts.getValue() / testDuration, Averaged::True);
 		m.push_back(commits.getMetric());
-		m.push_back(PerfMetric("Commits/sec", commits.getValue() / testDuration, true));
+		m.emplace_back("Commits/sec", commits.getValue() / testDuration, Averaged::True);
 		m.push_back(conflicts.getMetric());
-		m.push_back(PerfMetric("Conflicts/sec", conflicts.getValue() / testDuration, true));
+		m.emplace_back("Conflicts/sec", conflicts.getValue() / testDuration, Averaged::True);
 	}
 
 	// disable the default timeout setting
@@ -187,13 +184,19 @@ struct ReportConflictingKeysWorkload : TestWorkload {
 				// check API correctness
 				if (foundConflict) {
 					// \xff\xff/transaction/conflicting_keys is always initialized to false, skip it here
-					state KeyRange ckr =
-					    KeyRangeRef(keyAfter(LiteralStringRef("").withPrefix(conflictingKeysRange.begin)),
-					                LiteralStringRef("\xff\xff").withPrefix(conflictingKeysRange.begin));
+					state KeyRange ckr = KeyRangeRef(keyAfter(""_sr.withPrefix(conflictingKeysRange.begin)),
+					                                 "\xff\xff"_sr.withPrefix(conflictingKeysRange.begin));
 					// The getRange here using the special key prefix "\xff\xff/transaction/conflicting_keys/" happens
 					// locally Thus, the error handling is not needed here
-					Future<RangeResult> conflictingKeyRangesFuture = tr2->getRange(ckr, CLIENT_KNOBS->TOO_MANY);
+					state Future<RangeResult> conflictingKeyRangesFuture = tr2->getRange(ckr, CLIENT_KNOBS->TOO_MANY);
 					ASSERT(conflictingKeyRangesFuture.isReady());
+
+					wait(validateSpecialSubrangeRead(tr2.getPtr(),
+					                                 firstGreaterOrEqual(ckr.begin),
+					                                 firstGreaterOrEqual(ckr.end),
+					                                 GetRangeLimits(),
+					                                 Reverse::False,
+					                                 conflictingKeyRangesFuture.get()));
 
 					tr2 = makeReference<ReadYourWritesTransaction>(cx);
 
@@ -293,4 +296,4 @@ struct ReportConflictingKeysWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<ReportConflictingKeysWorkload> ReportConflictingKeysWorkload("ReportConflictingKeys");
+WorkloadFactory<ReportConflictingKeysWorkload> ReportConflictingKeysWorkload;

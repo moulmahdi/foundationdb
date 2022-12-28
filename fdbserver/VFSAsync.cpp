@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,12 +18,12 @@
  * limitations under the License.
  */
 
-#include "sqlite/sqlite3.h"
+#include "sqlite3.h"
 #include <stdio.h>
 #include <string>
 #include <vector>
 #include "fdbrpc/fdbrpc.h"
-#include "fdbrpc/IAsyncFile.h"
+#include "flow/IAsyncFile.h"
 #include "fdbserver/CoroFlow.h"
 #include "fdbrpc/simulator.h"
 #include "fdbrpc/AsyncFileReadAhead.actor.h"
@@ -168,7 +168,7 @@ static int asyncReadZeroCopy(sqlite3_file* pFile, void** data, int iAmt, sqlite_
 }
 static int asyncReleaseZeroCopy(sqlite3_file* pFile, void* data, int iAmt, sqlite_int64 iOfst) {
 	// printf("-asyncReleaseRef %p +%lld %d <= %p\n", pFile, iOfst, iAmt, data);
-	delete[](char*) data;
+	delete[] (char*)data;
 	return SQLITE_OK;
 }
 #endif
@@ -299,7 +299,7 @@ struct SharedMemoryInfo { // for a file
 	}
 	void cleanup() {
 		for (int i = 0; i < regions.size(); i++)
-			delete[](uint8_t*) regions[i];
+			delete[] (uint8_t*)regions[i];
 		table.erase(filename);
 	}
 
@@ -731,7 +731,7 @@ static int asyncSleep(sqlite3_vfs* pVfs, int microseconds) {
 	try {
 		Future<Void> simCancel = Never();
 		if (g_network->isSimulated())
-			simCancel = success(g_simulator.getCurrentProcess()->shutdownSignal.getFuture());
+			simCancel = success(g_simulator->getCurrentProcess()->shutdownSignal.getFuture());
 		if (simCancel.isReady()) {
 			waitFor(delay(FLOW_KNOBS->MAX_BUGGIFIED_DELAY));
 			return 0;
@@ -742,7 +742,7 @@ static int asyncSleep(sqlite3_vfs* pVfs, int microseconds) {
 		if (e.isInjectedFault()) {
 			VFSAsyncFile::setInjectedError(SQLITE_ERROR);
 		}
-		TraceEvent(SevError, "VFSAsyncSleepError").error(e, true);
+		TraceEvent(SevError, "VFSAsyncSleepError").errorUnsuppressed(e);
 		return 0;
 	}
 }

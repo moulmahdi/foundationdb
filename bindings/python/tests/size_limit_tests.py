@@ -22,16 +22,19 @@ import fdb
 import sys
 
 if __name__ == '__main__':
-    fdb.api_version(710)
+    fdb.api_version(720)
+
 
 @fdb.transactional
 def setValue(tr, key, value):
     tr[key] = value
 
+
 @fdb.transactional
 def setValueWithLimit(tr, key, value, limit):
     tr.options.set_size_limit(limit)
     tr[key] = value
+
 
 def test_size_limit_option(db):
     value = b'a' * 1024
@@ -66,6 +69,10 @@ def test_size_limit_option(db):
     except fdb.FDBError as e:
         assert(e.code == 2101)  # Transaction exceeds byte limit (2101)
 
+    # Reset the size limit for future tests
+    db.options.set_transaction_size_limit(10000000)
+
+
 @fdb.transactional
 def test_get_approximate_size(tr):
     tr[b'key1'] = b'value1'
@@ -86,6 +93,7 @@ def test_get_approximate_size(tr):
     tr.add_write_conflict_key(b'key4')
     s5 = tr.get_approximate_size().wait()
     assert(s4 < s5)
+
 
 # Expect a cluster file as input. This test will write to the FDB cluster, so
 # be aware of potential side effects.

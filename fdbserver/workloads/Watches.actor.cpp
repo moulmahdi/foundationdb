@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,36 +18,34 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "flow/DeterministicRandom.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-const int sampleSize = 10000;
-
 struct WatchesWorkload : TestWorkload {
+	static constexpr auto NAME = "Watches";
+
 	int nodes, keyBytes, extraPerNode;
 	double testDuration;
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter cycles;
-	ContinuousSample<double> cycleLatencies;
+	DDSketch<double> cycleLatencies;
 	std::vector<int> nodeOrder;
 
-	WatchesWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), cycles("Cycles"), cycleLatencies(sampleSize) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 600.0);
-		nodes = getOption(options, LiteralStringRef("nodeCount"), 100);
-		extraPerNode = getOption(options, LiteralStringRef("extraPerNode"), 1000);
-		keyBytes = std::max(getOption(options, LiteralStringRef("keyBytes"), 16), 16);
+	WatchesWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), cycles("Cycles"), cycleLatencies() {
+		testDuration = getOption(options, "testDuration"_sr, 600.0);
+		nodes = getOption(options, "nodeCount"_sr, 100);
+		extraPerNode = getOption(options, "extraPerNode"_sr, 1000);
+		keyBytes = std::max(getOption(options, "keyBytes"_sr, 16), 16);
 
 		for (int i = 0; i < nodes + 1; i++)
 			nodeOrder.push_back(i);
 		DeterministicRandom tempRand(1);
 		tempRand.randomShuffle(nodeOrder);
 	}
-
-	std::string description() const override { return "Watches"; }
 
 	Future<Void> setup(Database const& cx) override { return _setup(cx, this); }
 
@@ -66,10 +64,10 @@ struct WatchesWorkload : TestWorkload {
 		return ok;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (clientId == 0) {
 			m.push_back(cycles.getMetric());
-			m.push_back(PerfMetric("Mean Latency (ms)", 1000 * cycleLatencies.mean() / nodes, true));
+			m.emplace_back("Mean Latency (ms)", 1000 * cycleLatencies.mean() / nodes, Averaged::True);
 		}
 	}
 
@@ -85,7 +83,7 @@ struct WatchesWorkload : TestWorkload {
 	}
 
 	ACTOR Future<Void> _setup(Database cx, WatchesWorkload* self) {
-		vector<Future<Void>> setupActors;
+		std::vector<Future<Void>> setupActors;
 		for (int i = 0; i < self->nodes; i++)
 			if (i % self->clientCount == self->clientId)
 				setupActors.push_back(self->watcherInit(cx,
@@ -263,4 +261,4 @@ struct WatchesWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<WatchesWorkload> WatchesWorkloadFactory("Watches");
+WorkloadFactory<WatchesWorkload> WatchesWorkloadFactory;

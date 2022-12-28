@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2019 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,11 +20,13 @@
 
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/BackupContainer.h"
+#include "fdbclient/BlobCipher.h"
 #include "fdbclient/DatabaseContext.h"
 #include "fdbclient/CommitProxyInterface.h"
 #include "fdbclient/SystemData.h"
 #include "fdbserver/BackupInterface.h"
 #include "fdbserver/BackupProgress.actor.h"
+#include "fdbclient/GetEncryptCipherKeys.actor.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/LogProtocolMessage.h"
 #include "fdbserver/LogSystem.h"
@@ -34,7 +36,7 @@
 #include "flow/Error.h"
 
 #include "flow/IRandom.h"
-#include "flow/Tracing.h"
+#include "fdbclient/Tracing.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 #define SevDebugMemory SevVerbose
@@ -44,16 +46,18 @@ struct VersionedMessage {
 	StringRef message;
 	VectorRef<Tag> tags;
 	Arena arena; // Keep a reference to the memory containing the message
+	Arena decryptArena; // Arena used for decrypt buffer.
 	size_t bytes; // arena's size when inserted, which can grow afterwards
 
-	VersionedMessage(LogMessageVersion v, StringRef m, const VectorRef<Tag>& t, const Arena& a)
-	  : version(v), message(m), tags(t), arena(a), bytes(a.getSize()) {}
+	VersionedMessage(LogMessageVersion v, StringRef m, const VectorRef<Tag>& t, const Arena& a, size_t n)
+	  : version(v), message(m), tags(t), arena(a), bytes(n) {}
 	Version getVersion() const { return version.version; }
 	uint32_t getSubVersion() const { return version.sub; }
 
-	// Returns true if the message is a mutation that should be backuped, i.e.,
-	// either key is not in system key space or is not a metadataVersionKey.
-	bool isBackupMessage(MutationRef* m) const {
+	// Returns true if the message is a mutation that could be backed up (normal keys, system key backup ranges, or the
+	// metadata version key)
+	bool isCandidateBackupMessage(MutationRef* m,
+	                              const std::unordered_map<BlobCipherDetails, Reference<BlobCipherKey>>& cipherKeys) {
 		for (Tag tag : tags) {
 			if (tag.locality == tagLocalitySpecial || tag.locality == tagLocalityTxs) {
 				return false; // skip Txs mutations
@@ -67,9 +71,44 @@ struct VersionedMessage {
 			return false;
 		if (reader.protocolVersion().hasSpanContext() && SpanContextMessage::isNextIn(reader))
 			return false;
-
+		if (reader.protocolVersion().hasOTELSpanContext() && OTELSpanContextMessage::isNextIn(reader)) {
+			CODE_PROBE(true, "Returning false for OTELSpanContextMessage");
+			return false;
+		}
 		reader >> *m;
-		return normalKeys.contains(m->param1) || m->param1 == metadataVersionKey;
+		if (m->isEncrypted()) {
+			// In case the mutation is encrypted, get the decrypted mutation and also update message to point to
+			// the decrypted mutation.
+			// We use dedicated arena for decrypt buffer, as the other arena is used to count towards backup lock bytes.
+			*m = m->decrypt(cipherKeys, decryptArena, BlobCipherMetrics::BACKUP, &message);
+		}
+
+		// Return true if the mutation intersects any legal backup ranges
+		if (normalKeys.contains(m->param1) || m->param1 == metadataVersionKey) {
+			return true;
+		} else if (m->type != MutationRef::Type::ClearRange) {
+			return systemBackupMutationMask().rangeContaining(m->param1).value();
+		} else {
+			for (auto& r : systemBackupMutationMask().intersectingRanges(KeyRangeRef(m->param1, m->param2))) {
+				if (r->value()) {
+					return true;
+				}
+			}
+
+			return false;
+		}
+	}
+
+	void collectCipherDetailIfEncrypted(std::unordered_set<BlobCipherDetails>& cipherDetails) {
+		ASSERT(!message.empty());
+		if (*message.begin() == MutationRef::Encrypted) {
+			ArenaReader reader(arena, message, AssumeVersion(ProtocolVersion::withEncryptionAtRest()));
+			MutationRef m;
+			reader >> m;
+			const BlobCipherEncryptHeader* header = m.encryptionHeader();
+			cipherDetails.insert(header->cipherTextDetails);
+			cipherDetails.insert(header->cipherHeaderDetails);
+		}
 	}
 };
 
@@ -85,6 +124,7 @@ struct BackupData {
 	Version minKnownCommittedVersion;
 	Version savedVersion; // Largest version saved to blob storage
 	Version popVersion; // Largest version popped in NOOP mode, can be larger than savedVersion.
+	Reference<AsyncVar<ServerDBInfo> const> db;
 	AsyncVar<Reference<ILogSystem>> logSystem;
 	Database cx;
 	std::vector<VersionedMessage> messages;
@@ -100,8 +140,8 @@ struct BackupData {
 		PerBackupInfo(BackupData* data, UID uid, Version v) : self(data), startVersion(v) {
 			// Open the container and get key ranges
 			BackupConfig config(uid);
-			container = config.backupContainer().get(data->cx);
-			ranges = config.backupRanges().get(data->cx);
+			container = config.backupContainer().get(data->cx.getReference());
+			ranges = config.backupRanges().get(data->cx.getReference());
 			if (self->backupEpoch == self->recruitedEpoch) {
 				// Only current epoch's worker update the number of backup workers.
 				updateWorker = _updateStartedWorkers(this, data, uid);
@@ -241,7 +281,7 @@ struct BackupData {
 	  : myId(id), tag(req.routerTag), totalTags(req.totalTags), startVersion(req.startVersion),
 	    endVersion(req.endVersion), recruitedEpoch(req.recruitedEpoch), backupEpoch(req.backupEpoch),
 	    minKnownCommittedVersion(invalidVersion), savedVersion(req.startVersion - 1), popVersion(req.startVersion - 1),
-	    pulledVersion(0), paused(false), lock(new FlowLock(SERVER_KNOBS->BACKUP_LOCK_BYTES)),
+	    db(db), pulledVersion(0), paused(false), lock(new FlowLock(SERVER_KNOBS->BACKUP_LOCK_BYTES)),
 	    cc("BackupWorker", myId.toString()) {
 		cx = openDBOnServer(db, TaskPriority::DefaultEndpoint, LockAware::True);
 
@@ -250,8 +290,8 @@ struct BackupData {
 		specialCounter(cc, "MsgQ", [this]() { return this->messages.size(); });
 		specialCounter(cc, "BufferedBytes", [this]() { return this->lock->activePermits(); });
 		specialCounter(cc, "AvailableBytes", [this]() { return this->lock->available(); });
-		logger = traceCounters(
-		    "BackupWorkerMetrics", myId, SERVER_KNOBS->WORKER_LOGGING_INTERVAL, &cc, "BackupWorkerMetrics");
+		logger =
+		    cc.traceCounters("BackupWorkerMetrics", myId, SERVER_KNOBS->WORKER_LOGGING_INTERVAL, "BackupWorkerMetrics");
 	}
 
 	bool pullFinished() const { return endVersion.present() && pulledVersion.get() > endVersion.get(); }
@@ -428,17 +468,30 @@ struct BackupData {
 	ACTOR static Future<Version> _getMinKnownCommittedVersion(BackupData* self) {
 		state Span span("BA:GetMinCommittedVersion"_loc);
 		loop {
-			GetReadVersionRequest request(span.context,
-			                              0,
-			                              TransactionPriority::DEFAULT,
-			                              GetReadVersionRequest::FLAG_USE_MIN_KNOWN_COMMITTED_VERSION);
-			choose {
-				when(wait(self->cx->onProxiesChanged())) {}
-				when(GetReadVersionReply reply = wait(basicLoadBalance(self->cx->getGrvProxies(false),
-				                                                       &GrvProxyInterface::getConsistentReadVersion,
-				                                                       request,
-				                                                       self->cx->taskID))) {
-					return reply.version;
+			try {
+				GetReadVersionRequest request(span.context,
+				                              0,
+				                              TransactionPriority::DEFAULT,
+				                              invalidVersion,
+				                              GetReadVersionRequest::FLAG_USE_MIN_KNOWN_COMMITTED_VERSION);
+				choose {
+					when(wait(self->cx->onProxiesChanged())) {}
+					when(GetReadVersionReply reply =
+					         wait(basicLoadBalance(self->cx->getGrvProxies(UseProvisionalProxies::False),
+					                               &GrvProxyInterface::getConsistentReadVersion,
+					                               request,
+					                               self->cx->taskID))) {
+						self->cx->ssVersionVectorCache.applyDelta(reply.ssVersionVectorDelta);
+						return reply.version;
+					}
+				}
+			} catch (Error& e) {
+				if (e.code() == error_code_batch_transaction_throttled ||
+				    e.code() == error_code_grv_proxy_memory_limit_exceeded) {
+					// GRV Proxy returns an error
+					wait(delayJittered(CLIENT_KNOBS->GRV_ERROR_RETRY_DELAY));
+				} else {
+					throw;
 				}
 			}
 		}
@@ -675,7 +728,10 @@ ACTOR static Future<Void> updateLogBytesWritten(BackupData* self,
 // Saves messages in the range of [0, numMsg) to a file and then remove these
 // messages. The file content format is a sequence of (Version, sub#, msgSize, message).
 // Note only ready backups are saved.
-ACTOR Future<Void> saveMutationsToFile(BackupData* self, Version popVersion, int numMsg) {
+ACTOR Future<Void> saveMutationsToFile(BackupData* self,
+                                       Version popVersion,
+                                       int numMsg,
+                                       std::unordered_set<BlobCipherDetails> cipherDetails) {
 	state int blockSize = SERVER_KNOBS->BACKUP_FILE_BLOCK_BYTES;
 	state std::vector<Future<Reference<IBackupFile>>> logFileFutures;
 	state std::vector<Reference<IBackupFile>> logFiles;
@@ -684,6 +740,7 @@ ACTOR Future<Void> saveMutationsToFile(BackupData* self, Version popVersion, int
 	state std::vector<Version> beginVersions; // logFiles' begin versions
 	state KeyRangeMap<std::set<int>> keyRangeMap; // range to index in logFileFutures, logFiles, & blockEnds
 	state std::vector<Standalone<StringRef>> mutations;
+	state std::unordered_map<BlobCipherDetails, Reference<BlobCipherKey>> cipherKeys;
 	state int idx;
 
 	// Make sure all backups are ready, otherwise mutations will be lost.
@@ -735,15 +792,21 @@ ACTOR Future<Void> saveMutationsToFile(BackupData* self, Version popVersion, int
 		    .detail("File", logFiles[i]->getFileName());
 	}
 
+	// Fetch cipher keys if any of the messages are encrypted.
+	if (!cipherDetails.empty()) {
+		std::unordered_map<BlobCipherDetails, Reference<BlobCipherKey>> getCipherKeysResult =
+		    wait(getEncryptCipherKeys(self->db, cipherDetails, BlobCipherMetrics::BLOB_GRANULE));
+		cipherKeys = getCipherKeysResult;
+	}
+
 	blockEnds = std::vector<int64_t>(logFiles.size(), 0);
 	for (idx = 0; idx < numMsg; idx++) {
-		const auto& message = self->messages[idx];
+		auto& message = self->messages[idx];
 		MutationRef m;
-		if (!message.isBackupMessage(&m))
+		if (!message.isCandidateBackupMessage(&m, cipherKeys))
 			continue;
 
 		DEBUG_MUTATION("addMutation", message.version.version, m)
-		    .detail("Version", message.version.toString())
 		    .detail("KCV", self->minKnownCommittedVersion)
 		    .detail("SavedVersion", self->savedVersion);
 
@@ -809,6 +872,7 @@ ACTOR Future<Void> uploadData(BackupData* self) {
 		state Future<Void> uploadDelay = delay(SERVER_KNOBS->BACKUP_UPLOAD_DELAY);
 
 		state int numMsg = 0;
+		state std::unordered_set<BlobCipherDetails> cipherDetails;
 		Version lastPopVersion = popVersion;
 		// index of last version's end position in self->messages
 		int lastVersionIndex = 0;
@@ -820,7 +884,7 @@ ACTOR Future<Void> uploadData(BackupData* self) {
 				popVersion = std::max(popVersion, self->minKnownCommittedVersion);
 			}
 		} else {
-			for (const auto& message : self->messages) {
+			for (auto& message : self->messages) {
 				// message may be prefetched in peek; uncommitted message should not be uploaded.
 				const Version version = message.getVersion();
 				if (version > self->maxPopVersion())
@@ -830,6 +894,7 @@ ACTOR Future<Void> uploadData(BackupData* self) {
 					lastVersion = popVersion;
 					popVersion = version;
 				}
+				message.collectCipherDetailIfEncrypted(cipherDetails);
 				numMsg++;
 			}
 		}
@@ -839,6 +904,10 @@ ACTOR Future<Void> uploadData(BackupData* self) {
 			// make sure file is saved on version boundary
 			popVersion = lastVersion;
 			numMsg = lastVersionIndex;
+
+			// If we aren't able to process any messages and the lock is blocking us from
+			// queuing more, then we are stuck. This could suggest the lock capacity is too small.
+			ASSERT(numMsg > 0 || self->lock->waiters() == 0);
 		}
 		if (((numMsg > 0 || popVersion > lastPopVersion) && self->pulling) || self->pullFinished()) {
 			TraceEvent("BackupWorkerSave", self->myId)
@@ -849,7 +918,7 @@ ACTOR Future<Void> uploadData(BackupData* self) {
 			    .detail("NumMsg", numMsg)
 			    .detail("MsgQ", self->messages.size());
 			// save an empty file for old epochs so that log file versions are continuous
-			wait(saveMutationsToFile(self, popVersion, numMsg));
+			wait(saveMutationsToFile(self, popVersion, numMsg, cipherDetails));
 			self->eraseMessages(numMsg);
 		}
 
@@ -893,7 +962,9 @@ ACTOR Future<Void> pullAsyncData(BackupData* self) {
 		}
 
 		loop choose {
-			when(wait(r ? r->getMore(TaskPriority::TLogCommit) : Never())) { break; }
+			when(wait(r ? r->getMore(TaskPriority::TLogCommit) : Never())) {
+				break;
+			}
 			when(wait(logSystemChange)) {
 				if (self->logSystem.get()) {
 					r = self->logSystem.get()->peekLogRouter(self->myId, tagAt, self->tag);
@@ -908,15 +979,17 @@ ACTOR Future<Void> pullAsyncData(BackupData* self) {
 		// Note we aggressively peek (uncommitted) messages, but only committed
 		// messages/mutations will be flushed to disk/blob in uploadData().
 		while (r->hasMessage()) {
+			state size_t takeBytes = 0;
 			if (!prev.sameArena(r->arena())) {
 				TraceEvent(SevDebugMemory, "BackupWorkerMemory", self->myId)
 				    .detail("Take", r->arena().getSize())
 				    .detail("Current", self->lock->activePermits());
 
-				wait(self->lock->take(TaskPriority::DefaultYield, r->arena().getSize()));
+				takeBytes = r->arena().getSize(); // more bytes can be allocated after the wait.
+				wait(self->lock->take(TaskPriority::DefaultYield, takeBytes));
 				prev = r->arena();
 			}
-			self->messages.emplace_back(r->version(), r->getMessage(), r->getTags(), r->arena());
+			self->messages.emplace_back(r->version(), r->getMessage(), r->getTags(), r->arena(), takeBytes);
 			r->nextMessage();
 		}
 
@@ -963,7 +1036,9 @@ ACTOR Future<Void> monitorBackupKeyOrPullData(BackupData* self, bool keyPresent)
 			state Future<Version> committedVersion = self->getMinKnownCommittedVersion();
 
 			loop choose {
-				when(wait(success(present))) { break; }
+				when(wait(success(present))) {
+					break;
+				}
 				when(wait(success(committedVersion) || delay(SERVER_KNOBS->BACKUP_NOOP_POP_DELAY, self->cx->taskID))) {
 					if (committedVersion.isReady()) {
 						self->popVersion =
@@ -1014,7 +1089,7 @@ ACTOR static Future<Void> monitorWorkerPause(BackupData* self) {
 			tr->setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
 
 			Optional<Value> value = wait(tr->get(backupPausedKey));
-			bool paused = value.present() && value.get() == LiteralStringRef("1");
+			bool paused = value.present() && value.get() == "1"_sr;
 			if (self->paused.get() != paused) {
 				TraceEvent(paused ? "BackupWorkerPaused" : "BackupWorkerResumed", self->myId).log();
 				self->paused.set(paused);
@@ -1082,7 +1157,7 @@ ACTOR Future<Void> backupWorker(BackupInterface interf,
 				TraceEvent("BackupWorkerDone", self.myId).detail("BackupEpoch", self.backupEpoch);
 				// Notify master so that this worker can be removed from log system, then this
 				// worker (for an old epoch's unfinished work) can safely exit.
-				wait(brokenPromiseToNever(db->get().master.notifyBackupWorkerDone.getReply(
+				wait(brokenPromiseToNever(db->get().clusterInterface.notifyBackupWorkerDone.getReply(
 				    BackupWorkerDoneRequest(self.myId, self.backupEpoch))));
 				break;
 			}
@@ -1096,10 +1171,10 @@ ACTOR Future<Void> backupWorker(BackupInterface interf,
 			try {
 				wait(done);
 			} catch (Error& e) {
-				TraceEvent("BackupWorkerShutdownError", self.myId).error(e, true);
+				TraceEvent("BackupWorkerShutdownError", self.myId).errorUnsuppressed(e);
 			}
 		}
-		TraceEvent("BackupWorkerTerminated", self.myId).error(err, true);
+		TraceEvent("BackupWorkerTerminated", self.myId).errorUnsuppressed(err);
 		if (err.code() != error_code_actor_cancelled && err.code() != error_code_worker_removed) {
 			throw err;
 		}

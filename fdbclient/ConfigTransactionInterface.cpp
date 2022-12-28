@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,10 +34,15 @@ void ConfigTransactionInterface::setupWellKnownEndpoints() {
 }
 
 ConfigTransactionInterface::ConfigTransactionInterface(NetworkAddress const& remote)
-  : getGeneration(Endpoint({ remote }, WLTOKEN_CONFIGTXN_GETGENERATION)),
-    get(Endpoint({ remote }, WLTOKEN_CONFIGTXN_GET)), getClasses(Endpoint({ remote }, WLTOKEN_CONFIGTXN_GETCLASSES)),
-    getKnobs(Endpoint({ remote }, WLTOKEN_CONFIGTXN_GETKNOBS)), commit(Endpoint({ remote }, WLTOKEN_CONFIGTXN_COMMIT)) {
-}
+  : _id(deterministicRandom()->randomUniqueID()),
+    getGeneration(Endpoint::wellKnown({ remote }, WLTOKEN_CONFIGTXN_GETGENERATION)),
+    get(Endpoint::wellKnown({ remote }, WLTOKEN_CONFIGTXN_GET)),
+    getClasses(Endpoint::wellKnown({ remote }, WLTOKEN_CONFIGTXN_GETCLASSES)),
+    getKnobs(Endpoint::wellKnown({ remote }, WLTOKEN_CONFIGTXN_GETKNOBS)),
+    commit(Endpoint::wellKnown({ remote }, WLTOKEN_CONFIGTXN_COMMIT)) {}
+
+ConfigTransactionInterface::ConfigTransactionInterface(Hostname const& remote)
+  : _id(deterministicRandom()->randomUniqueID()), hostname(remote) {}
 
 bool ConfigTransactionInterface::operator==(ConfigTransactionInterface const& rhs) const {
 	return _id == rhs._id;
@@ -68,24 +73,5 @@ bool ConfigGeneration::operator>(ConfigGeneration const& rhs) const {
 		return committedVersion > rhs.committedVersion;
 	} else {
 		return liveVersion > rhs.liveVersion;
-	}
-}
-
-void ConfigTransactionCommitRequest::set(KeyRef key, ValueRef value) {
-	if (key == configTransactionDescriptionKey) {
-		annotation.description = KeyRef(arena, value);
-	} else {
-		ConfigKey configKey = ConfigKeyRef::decodeKey(key);
-		auto knobValue = IKnobCollection::parseKnobValue(
-		    configKey.knobName.toString(), value.toString(), IKnobCollection::Type::TEST);
-		mutations.emplace_back_deep(arena, configKey, knobValue.contents());
-	}
-}
-
-void ConfigTransactionCommitRequest::clear(KeyRef key) {
-	if (key == configTransactionDescriptionKey) {
-		annotation.description = ""_sr;
-	} else {
-		mutations.emplace_back_deep(arena, ConfigKeyRef::decodeKey(key), Optional<KnobValueRef>{});
 	}
 }

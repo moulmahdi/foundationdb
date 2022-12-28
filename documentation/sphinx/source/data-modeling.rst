@@ -1,13 +1,13 @@
 .. default-domain:: py
 .. default-domain:: py
 .. highlight:: python
-.. module:: fdb
 
 .. Required substitutions for api-common.rst.inc
 
 .. |database-type| replace:: ``Database``
 .. |database-class| replace:: ``Database``
 .. |database-auto| replace:: FIXME
+.. |tenant-type| replace:: FIXME
 .. |transaction-class| replace:: ``Transaction``
 .. |get-key-func| replace:: get_key()
 .. |get-range-func| replace:: get_range()

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ typedef Standalone<KeyRef> Key;
 typedef Standalone<ValueRef> Value;
 
 inline Key keyAfter(const KeyRef& key) {
-	if (key == LiteralStringRef("\xff\xff"))
+	if (key == "\xff\xff"_sr)
 		return key;
 
 	Standalone<StringRef> r;
@@ -43,7 +43,7 @@ inline Key keyAfter(const KeyRef& key) {
 }
 
 inline KeyRef keyAfter(const KeyRef& key, Arena& arena) {
-	if (key == LiteralStringRef("\xff\xff"))
+	if (key == "\xff\xff"_sr)
 		return key;
 	uint8_t* t = new (arena) uint8_t[key.size() + 1];
 	memcpy(t, key.begin(), key.size());
@@ -161,7 +161,7 @@ struct RangeResultRef : VectorRef<KeyValueRef> {
 	// False implies that no such values remain
 	Optional<KeyRef> readThrough; // Only present when 'more' is true. When present, this value represent the end (or
 	                              // beginning if reverse) of the range
-	// which was read to produce these results. This is guarenteed to be less than the requested range.
+	// which was read to produce these results. This is guaranteed to be less than the requested range.
 	bool readToBegin;
 	bool readThroughEnd;
 

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include "fdbserver/workloads/workloads.actor.h"
 
 struct ActorFuzzWorkload : TestWorkload {
+	static constexpr auto NAME = "ActorFuzz";
 	bool enabled;
 	std::pair<int, int> fuzzResults;
 
@@ -30,7 +31,6 @@ struct ActorFuzzWorkload : TestWorkload {
 		enabled = !clientId; // only do this on the "first" client
 	}
 
-	std::string description() const override { return "ActorFuzzWorkload"; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override {
 		if (enabled) {
@@ -48,7 +48,7 @@ struct ActorFuzzWorkload : TestWorkload {
 		return Void();
 	}
 	Future<bool> check(Database const& cx) override { return fuzzResults.first == fuzzResults.second; }
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<ActorFuzzWorkload> ActorFuzzWorkloadFactory("ActorFuzz");
+WorkloadFactory<ActorFuzzWorkload> ActorFuzzWorkloadFactory;

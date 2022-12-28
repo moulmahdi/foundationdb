@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,28 +25,28 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct RandomSelectorWorkload : TestWorkload {
+	static constexpr auto NAME = "RandomSelector";
+
 	int minOperationsPerTransaction, maxOperationsPerTransaction, maxKeySpace, maxOffset, minInitialAmount,
 	    maxInitialAmount;
 	double testDuration;
 	bool fail;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, retries;
 
 	RandomSelectorWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries") {
 
-		minOperationsPerTransaction = getOption(options, LiteralStringRef("minOperationsPerTransaction"), 10);
-		maxOperationsPerTransaction = getOption(options, LiteralStringRef("minOperationsPerTransaction"), 50);
-		maxKeySpace = getOption(options, LiteralStringRef("maxKeySpace"), 20);
-		maxOffset = getOption(options, LiteralStringRef("maxOffset"), 5);
-		minInitialAmount = getOption(options, LiteralStringRef("minInitialAmount"), 5);
-		maxInitialAmount = getOption(options, LiteralStringRef("maxInitialAmount"), 10);
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
+		minOperationsPerTransaction = getOption(options, "minOperationsPerTransaction"_sr, 10);
+		maxOperationsPerTransaction = getOption(options, "minOperationsPerTransaction"_sr, 50);
+		maxKeySpace = getOption(options, "maxKeySpace"_sr, 20);
+		maxOffset = getOption(options, "maxOffset"_sr, 5);
+		minInitialAmount = getOption(options, "minInitialAmount"_sr, 5);
+		maxInitialAmount = getOption(options, "maxInitialAmount"_sr, 10);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
 		fail = false;
 	}
-
-	std::string description() const override { return "RandomSelector"; }
 
 	Future<Void> setup(Database const& cx) override { return randomSelectorSetup(cx->clone(), this); }
 
@@ -60,7 +60,7 @@ struct RandomSelectorWorkload : TestWorkload {
 		return !fail;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
 	}
@@ -571,4 +571,4 @@ struct RandomSelectorWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<RandomSelectorWorkload> RandomSelectorWorkloadFactory("RandomSelector");
+WorkloadFactory<RandomSelectorWorkload> RandomSelectorWorkloadFactory;

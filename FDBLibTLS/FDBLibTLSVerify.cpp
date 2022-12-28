@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,11 +20,15 @@
 
 #include "FDBLibTLS/FDBLibTLSVerify.h"
 
+#if defined(HAVE_WOLFSSL)
+#include <wolfssl/options.h>
+#endif
 #include <openssl/objects.h>
 
 #include <algorithm>
 #include <exception>
 #include <cstring>
+#include <stdexcept>
 
 static int hexValue(char c) {
 	static char const digits[] = "0123456789ABCDEF";

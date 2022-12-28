@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2021 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ ACTOR Future<Void> PipelinedReader::getNext_impl(PipelinedReader* self, Database
 	state Transaction tr(cx);
 
 	state GetRangeLimits limits(GetRangeLimits::ROW_LIMIT_UNLIMITED,
-	                            (g_network->isSimulated() && !g_simulator.speedUpSimulation)
+	                            (g_network->isSimulated() && !g_simulator->speedUpSimulation)
 	                                ? CLIENT_KNOBS->BACKUP_SIMULATED_LIMIT_BYTES
 	                                : CLIENT_KNOBS->BACKUP_GET_RANGE_LIMIT_BYTES);
 
@@ -179,7 +179,7 @@ ACTOR Future<Standalone<RangeResultRef>> MutationLogReader::getNext_impl(Mutatio
 namespace {
 // UNIT TESTS
 TEST_CASE("/fdbclient/mutationlogreader/VersionKeyRefConversion") {
-	Key prefix = LiteralStringRef("foos");
+	Key prefix = "foos"_sr;
 
 	ASSERT(keyRefToVersion(versionToKey(0, prefix), prefix.size()) == 0);
 	ASSERT(keyRefToVersion(versionToKey(1, prefix), prefix.size()) == 1);

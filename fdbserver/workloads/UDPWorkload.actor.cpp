@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@
 #include "flow/IRandom.h"
 #include "flow/flow.h"
 #include "flow/network.h"
-#include "flow/actorcompiler.h" // has to be last include
 #include "flow/serialize.h"
 #include <functional>
 #include <limits>
@@ -36,10 +35,12 @@
 #include <memory>
 #include <functional>
 
+#include "flow/actorcompiler.h" // has to be last include
+
 namespace {
 
 struct UDPWorkload : TestWorkload {
-	constexpr static const char* name = "UDPWorkload";
+	constexpr static auto NAME = "UDPWorkload";
 	// config
 	Key keyPrefix;
 	double runFor;
@@ -60,7 +61,6 @@ struct UDPWorkload : TestWorkload {
 		}
 	}
 
-	std::string description() const override { return name; }
 	ACTOR static Future<Void> _setup(UDPWorkload* self, Database cx) {
 		state NetworkAddress localAddress(g_network->getLocalAddress().ip,
 		                                  deterministicRandom()->randomInt(self->minPort, self->maxPort + 1),
@@ -183,7 +183,9 @@ struct UDPWorkload : TestWorkload {
 					finished = delay(1.0);
 					done = Never();
 				}
-				when(wait(finished)) { return Void(); }
+				when(wait(finished)) {
+					return Void();
+				}
 			}
 		}
 	}
@@ -197,7 +199,9 @@ struct UDPWorkload : TestWorkload {
 		loop {
 			choose {
 				when(wait(delay(0.1))) {}
-				when(wait(actors.getResult())) { UNSTOPPABLE_ASSERT(false); }
+				when(wait(actors.getResult())) {
+					UNSTOPPABLE_ASSERT(false);
+				}
 			}
 			if (!socket.get().isValid() || deterministicRandom()->random01() < 0.05) {
 				peer = deterministicRandom()->randomChoice(*remotes);
@@ -238,7 +242,7 @@ struct UDPWorkload : TestWorkload {
 	}
 	Future<Void> start(Database const& cx) override { return delay(runFor) || _start(this, cx); }
 	Future<bool> check(Database const& cx) override { return true; }
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		unsigned totalReceived = 0, totalSent = 0, totalAcked = 0, totalSuccess = 0;
 		for (const auto& p : sent) {
 			totalSent += p.second;
@@ -252,13 +256,13 @@ struct UDPWorkload : TestWorkload {
 		for (const auto& p : successes) {
 			totalSuccess += p.second;
 		}
-		m.emplace_back("Sent", totalSent, false);
-		m.emplace_back("Received", totalReceived, false);
-		m.emplace_back("Acknknowledged", totalAcked, false);
-		m.emplace_back("Successes", totalSuccess, false);
+		m.emplace_back("Sent", totalSent, Averaged::False);
+		m.emplace_back("Received", totalReceived, Averaged::False);
+		m.emplace_back("Acknknowledged", totalAcked, Averaged::False);
+		m.emplace_back("Successes", totalSuccess, Averaged::False);
 	}
 };
 
 } // namespace
 
-WorkloadFactory<UDPWorkload> UDPWorkloadFactory(UDPWorkload::name);
+WorkloadFactory<UDPWorkload> UDPWorkloadFactory;

@@ -74,6 +74,9 @@
 .. |database-sync| replace::
     The convenience methods provided by |database-type| have the same signature as the corresponding methods of ``Transaction``. However, most of the |database-type| methods are fully synchronous. (An exception is the methods for watches.) As a result, the |database-type| methods do not support the use of :ref:`implicit parallelism with futures <developer-guide-programming-with-futures>`.
 
+.. |tenant-blurb1| replace::
+    |tenant-type| represents a FoundationDB tenant. Tenants are optional named transaction domains that can be used to provide multiple disjoint key-spaces to client applications. A transaction created in a tenant will be limited to the keys contained within that tenant, and transactions operating on different tenants can use the same key names without interfering with each other.
+
 .. |keysel-blurb1| replace::
     FoundationDB's lexicographically ordered data model permits finding keys based on their order (for example, finding the first key in the database greater than a given key). Key selectors represent a description of a key in the database that could be resolved to an actual key by |get-key-func| or used directly as the beginning or end of a range in |get-range-func|.
 
@@ -148,7 +151,7 @@
 .. |atomic-versionstamps-tuple-warning-value| replace::
     At this time, versionstamped values are not compatible with the Tuple layer except in Java, Python, and Go. Note that this implies versionstamped values may not be used with the Subspace and Directory layers except in those languages.
 
-.. |api-version| replace:: 710
+.. |api-version| replace:: 720
 
 .. |streaming-mode-blurb1| replace::
     When using |get-range-func| and similar interfaces, API clients can request large ranges of the database to iterate over.  Making such a request doesn't necessarily mean that the client will consume all of the data in the range - sometimes the client doesn't know how far it intends to iterate in advance.  FoundationDB tries to balance latency and bandwidth by requesting data for iteration in batches.
@@ -588,3 +591,43 @@
 .. |locality-get-addresses-for-key-blurb| replace::
 
     Returns a list of public network addresses as strings, one for each of the storage servers responsible for storing ``key`` and its associated value.
+
+.. |option-knob| replace::
+   
+   Sets internal tuning or debugging knobs. The argument to this function should be a string representing the knob name and the value, e.g. "transaction_size_limit=1000".
+
+.. |option-tls-verify-peers| replace::
+
+   Sets the peer certificate field verification criteria. 
+
+.. |option-tls-ca-bytes| replace::
+    
+   Sets the certificate authority bundle.
+
+.. |option-tls-ca-path| replace::
+
+   Sets the file from which to load the certificate authority bundle.
+
+.. |option-tls-password| replace::
+
+    Sets the passphrase for encrypted private key. Password should be set before setting the key for the password to be used.
+
+.. |option-set-disable-local-client| replace::
+
+    Prevents connections through the local client, allowing only connections through externally loaded client libraries.
+
+.. |option-set-client-threads-per-version| replace::
+   
+    Spawns multiple worker threads for each version of the client that is loaded.  Setting this to a number greater than one implies disable_local_client.
+
+.. |option-disable-client-statistics-logging| replace::
+
+    Disables logging of client statistics, such as sampled transaction activity.
+       
+.. |option-enable-run-loop-profiling| replace::
+
+    Enables debugging feature to perform run loop profiling. Requires trace logging to be enabled. WARNING: this feature is not recommended for use in production.
+
+.. |option-set-distributed-client-tracer| replace::
+
+    Sets a tracer to run on the client. Should be set to the same value as the tracer set on the server.

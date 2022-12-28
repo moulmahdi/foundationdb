@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,48 +18,21 @@
  * limitations under the License.
  */
 
-#define PRIVATE_EXCEPT_FOR_TLSCONFIG_CPP public
+#define PRIVATE_EXCEPT_FOR_TLSCONFIG_CPP
 #include "flow/TLSConfig.actor.h"
 #undef PRIVATE_EXCEPT_FOR_TLSCONFIG_CPP
 
 // To force typeinfo to only be emitted once.
 TLSPolicy::~TLSPolicy() {}
 
-namespace TLS {
-
-void DisableOpenSSLAtExitHandler() {
-#ifdef HAVE_OPENSSL_INIT_NO_ATEXIT
-	static bool once = false;
-	if (!once) {
-		once = true;
-		int success = OPENSSL_init_crypto(OPENSSL_INIT_NO_ATEXIT, nullptr);
-		if (!success) {
-			throw tls_error();
-		}
-	}
-#endif
-}
-
-void DestroyOpenSSLGlobalState() {
-#ifdef HAVE_OPENSSL_INIT_NO_ATEXIT
-	OPENSSL_cleanup();
-#endif
-}
-
-} // namespace TLS
-#ifdef TLS_DISABLED
-
-void LoadedTLSConfig::print(FILE* fp) {
-	fprintf(fp, "Cannot print LoadedTLSConfig.  TLS support is not enabled.\n");
-}
-
-#else // TLS is enabled
-
 #include <algorithm>
 #include <cstring>
 #include <exception>
 #include <map>
 #include <set>
+#if defined(HAVE_WOLFSSL)
+#include <wolfssl/options.h>
+#endif
 #include <openssl/objects.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -73,14 +46,8 @@ void LoadedTLSConfig::print(FILE* fp) {
 #include <utility>
 #include <boost/asio/ssl/context.hpp>
 
-// This include breaks module dependencies, but we need to do async file reads.
-// So either we include fdbrpc here, or this file is moved to fdbrpc/, and then
-// Net2, which depends on us, includes fdbrpc/.
-//
-// Either way, the only way to break this dependency cycle is to move all of
-// AsyncFile to flow/
-#include "fdbrpc/IAsyncFile.h"
 #include "flow/Platform.h"
+#include "flow/IAsyncFile.h"
 
 #include "flow/FastRef.h"
 #include "flow/Trace.h"
@@ -114,7 +81,7 @@ void LoadedTLSConfig::print(FILE* fp) {
 	int num_certs = 0;
 	boost::asio::ssl::context context(boost::asio::ssl::context::tls);
 	try {
-		ConfigureSSLContext(*this, &context);
+		ConfigureSSLContext(*this, context);
 	} catch (Error& e) {
 		fprintf(fp, "There was an error in loading the certificate chain.\n");
 		throw;
@@ -142,51 +109,58 @@ void LoadedTLSConfig::print(FILE* fp) {
 	X509_STORE_CTX_free(store_ctx);
 }
 
-void ConfigureSSLContext(const LoadedTLSConfig& loaded,
-                         boost::asio::ssl::context* context,
-                         std::function<void()> onPolicyFailure) {
+void ConfigureSSLContext(const LoadedTLSConfig& loaded, boost::asio::ssl::context& context) {
 	try {
-		context->set_options(boost::asio::ssl::context::default_workarounds);
-		context->set_verify_mode(boost::asio::ssl::context::verify_peer |
-		                         boost::asio::ssl::verify_fail_if_no_peer_cert);
+		context.set_options(boost::asio::ssl::context::default_workarounds);
+		auto verifyFailIfNoPeerCert = boost::asio::ssl::verify_fail_if_no_peer_cert;
+		// Servers get to accept connections without peer certs as "untrusted" clients
+		if (loaded.getEndpointType() == TLSEndpointType::SERVER)
+			verifyFailIfNoPeerCert = 0;
+		context.set_verify_mode(boost::asio::ssl::context::verify_peer | verifyFailIfNoPeerCert);
 
-		if (loaded.isTLSEnabled()) {
-			auto tlsPolicy = makeReference<TLSPolicy>(loaded.getEndpointType());
-			tlsPolicy->set_verify_peers({ loaded.getVerifyPeers() });
-
-			context->set_verify_callback(
-			    [policy = tlsPolicy, onPolicyFailure](bool preverified, boost::asio::ssl::verify_context& ctx) {
-				    bool success = policy->verify_peer(preverified, ctx.native_handle());
-				    if (!success) {
-					    onPolicyFailure();
-				    }
-				    return success;
-			    });
-		} else {
-			// Insecurely always except if TLS is not enabled.
-			context->set_verify_callback([](bool, boost::asio::ssl::verify_context&) { return true; });
-		}
-
-		context->set_password_callback([password = loaded.getPassword()](
-		                                   size_t, boost::asio::ssl::context::password_purpose) { return password; });
+		context.set_password_callback([password = loaded.getPassword()](
+		                                  size_t, boost::asio::ssl::context::password_purpose) { return password; });
 
 		const std::string& CABytes = loaded.getCABytes();
 		if (CABytes.size()) {
-			context->add_certificate_authority(boost::asio::buffer(CABytes.data(), CABytes.size()));
+			context.add_certificate_authority(boost::asio::buffer(CABytes.data(), CABytes.size()));
 		}
 
 		const std::string& keyBytes = loaded.getKeyBytes();
 		if (keyBytes.size()) {
-			context->use_private_key(boost::asio::buffer(keyBytes.data(), keyBytes.size()),
-			                         boost::asio::ssl::context::pem);
+			context.use_private_key(boost::asio::buffer(keyBytes.data(), keyBytes.size()),
+			                        boost::asio::ssl::context::pem);
 		}
 
 		const std::string& certBytes = loaded.getCertificateBytes();
 		if (certBytes.size()) {
-			context->use_certificate_chain(boost::asio::buffer(certBytes.data(), certBytes.size()));
+			context.use_certificate_chain(boost::asio::buffer(certBytes.data(), certBytes.size()));
 		}
 	} catch (boost::system::system_error& e) {
-		TraceEvent("TLSConfigureError")
+		TraceEvent("TLSContextConfigureError")
+		    .detail("What", e.what())
+		    .detail("Value", e.code().value())
+		    .detail("WhichMeans", TLSPolicy::ErrorString(e.code()));
+		throw tls_error();
+	}
+}
+
+void ConfigureSSLStream(Reference<TLSPolicy> policy,
+                        boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>& stream,
+                        std::function<void(bool)> callback) {
+	try {
+		stream.set_verify_callback([policy, callback](bool preverified, boost::asio::ssl::verify_context& ctx) {
+			bool success = policy->verify_peer(preverified, ctx.native_handle());
+			if (!success) {
+				if (policy->on_failure)
+					policy->on_failure();
+			}
+			if (callback)
+				callback(success);
+			return success;
+		});
+	} catch (boost::system::system_error& e) {
+		TraceEvent("TLSStreamConfigureError")
 		    .detail("What", e.what())
 		    .detail("Value", e.code().value())
 		    .detail("WhichMeans", TLSPolicy::ErrorString(e.code()));
@@ -204,11 +178,7 @@ std::string TLSConfig::getCertificatePathSync() const {
 		return envCertPath;
 	}
 
-	const char* defaultCertFileName = "fdb.pem";
-	if (fileExists(defaultCertFileName)) {
-		return defaultCertFileName;
-	}
-
+	const char* defaultCertFileName = "cert.pem";
 	if (fileExists(joinPath(platform::getDefaultConfigPath(), defaultCertFileName))) {
 		return joinPath(platform::getDefaultConfigPath(), defaultCertFileName);
 	}
@@ -226,13 +196,9 @@ std::string TLSConfig::getKeyPathSync() const {
 		return envKeyPath;
 	}
 
-	const char* defaultCertFileName = "fdb.pem";
-	if (fileExists(defaultCertFileName)) {
-		return defaultCertFileName;
-	}
-
-	if (fileExists(joinPath(platform::getDefaultConfigPath(), defaultCertFileName))) {
-		return joinPath(platform::getDefaultConfigPath(), defaultCertFileName);
+	const char* defaultKeyFileName = "key.pem";
+	if (fileExists(joinPath(platform::getDefaultConfigPath(), defaultKeyFileName))) {
+		return joinPath(platform::getDefaultConfigPath(), defaultKeyFileName);
 	}
 
 	return std::string();
@@ -256,7 +222,7 @@ LoadedTLSConfig TLSConfig::loadSync() const {
 		try {
 			loaded.tlsCertBytes = readFileBytes(certPath, FLOW_KNOBS->CERT_FILE_MAX_SIZE);
 		} catch (Error& e) {
-			fprintf(stderr, "Error reading TLS Certificate [%s]: %s\n", certPath.c_str(), e.what());
+			fprintf(stderr, "Warning: Error reading TLS Certificate [%s]: %s\n", certPath.c_str(), e.what());
 			throw;
 		}
 	} else {
@@ -268,7 +234,7 @@ LoadedTLSConfig TLSConfig::loadSync() const {
 		try {
 			loaded.tlsKeyBytes = readFileBytes(keyPath, FLOW_KNOBS->CERT_FILE_MAX_SIZE);
 		} catch (Error& e) {
-			fprintf(stderr, "Error reading TLS Key [%s]: %s\n", keyPath.c_str(), e.what());
+			fprintf(stderr, "Warning: Error reading TLS Key [%s]: %s\n", keyPath.c_str(), e.what());
 			throw;
 		}
 	} else {
@@ -280,7 +246,7 @@ LoadedTLSConfig TLSConfig::loadSync() const {
 		try {
 			loaded.tlsCABytes = readFileBytes(CAPath, FLOW_KNOBS->CERT_FILE_MAX_SIZE);
 		} catch (Error& e) {
-			fprintf(stderr, "Error reading TLS CA [%s]: %s\n", CAPath.c_str(), e.what());
+			fprintf(stderr, "Warning: Error reading TLS CA [%s]: %s\n", CAPath.c_str(), e.what());
 			throw;
 		}
 	} else {
@@ -292,6 +258,11 @@ LoadedTLSConfig TLSConfig::loadSync() const {
 	loaded.endpointType = endpointType;
 
 	return loaded;
+}
+
+TLSPolicy::TLSPolicy(const LoadedTLSConfig& loaded, std::function<void()> on_failure)
+  : rules(), on_failure(std::move(on_failure)), is_client(loaded.getEndpointType() == TLSEndpointType::CLIENT) {
+	set_verify_peers(loaded.getVerifyPeers());
 }
 
 // And now do the same thing, but async...
@@ -344,13 +315,13 @@ ACTOR Future<LoadedTLSConfig> TLSConfig::loadAsync(const TLSConfig* self) {
 		wait(waitForAll(reads));
 	} catch (Error& e) {
 		if (certIdx != -1 && reads[certIdx].isError()) {
-			fprintf(stderr, "Failure reading TLS Certificate [%s]: %s\n", certPath.c_str(), e.what());
+			fprintf(stderr, "Warning: Error reading TLS Certificate [%s]: %s\n", certPath.c_str(), e.what());
 		} else if (keyIdx != -1 && reads[keyIdx].isError()) {
-			fprintf(stderr, "Failure reading TLS Key [%s]: %s\n", keyPath.c_str(), e.what());
+			fprintf(stderr, "Warning: Error reading TLS Key [%s]: %s\n", keyPath.c_str(), e.what());
 		} else if (caIdx != -1 && reads[caIdx].isError()) {
-			fprintf(stderr, "Failure reading TLS Key [%s]: %s\n", CAPath.c_str(), e.what());
+			fprintf(stderr, "Warning: Error reading TLS Key [%s]: %s\n", CAPath.c_str(), e.what());
 		} else {
-			fprintf(stderr, "Failure reading TLS needed file: %s\n", e.what());
+			fprintf(stderr, "Warning: Error reading TLS needed file: %s\n", e.what());
 		}
 
 		throw;
@@ -856,4 +827,3 @@ bool TLSPolicy::verify_peer(bool preverified, X509_STORE_CTX* store_ctx) {
 	}
 	return rc;
 }
-#endif

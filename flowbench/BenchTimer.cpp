@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,17 +23,15 @@
 #include "flow/Platform.h"
 
 static void bench_timer(benchmark::State& state) {
-	while (state.KeepRunning()) {
-		double time = timer();
-		benchmark::DoNotOptimize(time);
+	for (auto _ : state) {
+		benchmark::DoNotOptimize(timer());
 	}
 	state.SetItemsProcessed(static_cast<long>(state.iterations()));
 }
 
 static void bench_timer_monotonic(benchmark::State& state) {
-	while (state.KeepRunning()) {
-		double time = timer_monotonic();
-		benchmark::DoNotOptimize(time);
+	for (auto _ : state) {
+		benchmark::DoNotOptimize(timer_monotonic());
 	}
 	state.SetItemsProcessed(static_cast<long>(state.iterations()));
 }

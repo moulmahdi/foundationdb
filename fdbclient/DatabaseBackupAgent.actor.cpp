@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,21 +26,22 @@
 #include "fdbclient/NativeAPI.actor.h"
 #include <ctime>
 #include <climits>
-#include "fdbrpc/IAsyncFile.h"
+#include "flow/IAsyncFile.h"
 #include "flow/genericactors.actor.h"
 #include "flow/Hash3.h"
 #include <numeric>
 #include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/KeyBackedTypes.h"
-#include "flow/actorcompiler.h" // has to be last include
 #include <inttypes.h>
 #include <map>
 
-const Key DatabaseBackupAgent::keyAddPrefix = LiteralStringRef("add_prefix");
-const Key DatabaseBackupAgent::keyRemovePrefix = LiteralStringRef("remove_prefix");
-const Key DatabaseBackupAgent::keyRangeVersions = LiteralStringRef("range_versions");
-const Key DatabaseBackupAgent::keyCopyStop = LiteralStringRef("copy_stop");
-const Key DatabaseBackupAgent::keyDatabasesInSync = LiteralStringRef("databases_in_sync");
+#include "flow/actorcompiler.h" // has to be last include
+
+const Key DatabaseBackupAgent::keyAddPrefix = "add_prefix"_sr;
+const Key DatabaseBackupAgent::keyRemovePrefix = "remove_prefix"_sr;
+const Key DatabaseBackupAgent::keyRangeVersions = "range_versions"_sr;
+const Key DatabaseBackupAgent::keyCopyStop = "copy_stop"_sr;
+const Key DatabaseBackupAgent::keyDatabasesInSync = "databases_in_sync"_sr;
 const int DatabaseBackupAgent::LATEST_DR_VERSION = 1;
 
 DatabaseBackupAgent::DatabaseBackupAgent()
@@ -74,14 +75,13 @@ DatabaseBackupAgent::DatabaseBackupAgent(Database src)
 class DRConfig {
 public:
 	DRConfig(UID uid = UID())
-	  : uid(uid),
-	    configSpace(uidPrefixKey(LiteralStringRef("uid->config/").withPrefix(databaseBackupPrefixRange.begin), uid)) {}
+	  : uid(uid), configSpace(uidPrefixKey("uid->config/"_sr.withPrefix(databaseBackupPrefixRange.begin), uid)) {}
 	DRConfig(Reference<Task> task)
 	  : DRConfig(BinaryReader::fromStringRef<UID>(task->params[BackupAgentBase::keyConfigLogUid], Unversioned())) {}
 
-	KeyBackedBinaryValue<int64_t> rangeBytesWritten() { return configSpace.pack(LiteralStringRef(__FUNCTION__)); }
+	KeyBackedBinaryValue<int64_t> rangeBytesWritten() { return configSpace.pack(__FUNCTION__sr); }
 
-	KeyBackedBinaryValue<int64_t> logBytesWritten() { return configSpace.pack(LiteralStringRef(__FUNCTION__)); }
+	KeyBackedBinaryValue<int64_t> logBytesWritten() { return configSpace.pack(__FUNCTION__sr); }
 
 	void clear(Reference<ReadYourWritesTransaction> tr) { tr->clear(configSpace.range()); }
 
@@ -136,7 +136,7 @@ struct BackupRangeTaskFunc : TaskFuncBase {
 	static constexpr uint32_t version = 1;
 
 	static struct {
-		static TaskParam<int64_t> bytesWritten() { return LiteralStringRef(__FUNCTION__); }
+		static TaskParam<int64_t> bytesWritten() { return __FUNCTION__sr; }
 	} Params;
 
 	static const Key keyAddBackupRangeTasks;
@@ -202,7 +202,7 @@ struct BackupRangeTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	ACTOR static Future<Void> _execute(Database cx,
@@ -362,7 +362,7 @@ struct BackupRangeTaskFunc : TaskFuncBase {
 					if ((!prevAdjacent || !nextAdjacent) &&
 					    rangeCount > ((prevAdjacent || nextAdjacent) ? CLIENT_KNOBS->BACKUP_MAP_KEY_UPPER_LIMIT
 					                                                 : CLIENT_KNOBS->BACKUP_MAP_KEY_LOWER_LIMIT)) {
-						TEST(true); // range insert delayed because too versionMap is too large
+						CODE_PROBE(true, "range insert delayed because too versionMap is too large");
 
 						if (rangeCount > CLIENT_KNOBS->BACKUP_MAP_KEY_UPPER_LIMIT)
 							TraceEvent(SevWarnAlways, "DBA_KeyRangeMapTooLarge").log();
@@ -404,10 +404,10 @@ struct BackupRangeTaskFunc : TaskFuncBase {
 							break;
 
 						if (backupVersions.get()[versionLoc + 1].key ==
-						    (removePrefix == StringRef() ? normalKeys.end : strinc(removePrefix))) {
+						    (removePrefix == StringRef() ? allKeys.end : strinc(removePrefix))) {
 							tr->clear(KeyRangeRef(
 							    backupVersions.get()[versionLoc].key.removePrefix(removePrefix).withPrefix(addPrefix),
-							    addPrefix == StringRef() ? normalKeys.end : strinc(addPrefix)));
+							    addPrefix == StringRef() ? allKeys.end : strinc(addPrefix)));
 						} else {
 							tr->clear(KeyRangeRef(backupVersions.get()[versionLoc].key,
 							                      backupVersions.get()[versionLoc + 1].key)
@@ -535,9 +535,9 @@ struct BackupRangeTaskFunc : TaskFuncBase {
 		return Void();
 	}
 };
-StringRef BackupRangeTaskFunc::name = LiteralStringRef("dr_backup_range");
-const Key BackupRangeTaskFunc::keyAddBackupRangeTasks = LiteralStringRef("addBackupRangeTasks");
-const Key BackupRangeTaskFunc::keyBackupRangeBeginKey = LiteralStringRef("backupRangeBeginKey");
+StringRef BackupRangeTaskFunc::name = "dr_backup_range"_sr;
+const Key BackupRangeTaskFunc::keyAddBackupRangeTasks = "addBackupRangeTasks"_sr;
+const Key BackupRangeTaskFunc::keyBackupRangeBeginKey = "backupRangeBeginKey"_sr;
 REGISTER_TASKFUNC(BackupRangeTaskFunc);
 
 struct FinishFullBackupTaskFunc : TaskFuncBase {
@@ -587,7 +587,7 @@ struct FinishFullBackupTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	StringRef getName() const override { return name; };
@@ -605,7 +605,7 @@ struct FinishFullBackupTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef FinishFullBackupTaskFunc::name = LiteralStringRef("dr_finish_full_backup");
+StringRef FinishFullBackupTaskFunc::name = "dr_finish_full_backup"_sr;
 REGISTER_TASKFUNC(FinishFullBackupTaskFunc);
 
 struct EraseLogRangeTaskFunc : TaskFuncBase {
@@ -682,7 +682,7 @@ struct EraseLogRangeTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	ACTOR static Future<Void> _finish(Reference<ReadYourWritesTransaction> tr,
@@ -696,7 +696,7 @@ struct EraseLogRangeTaskFunc : TaskFuncBase {
 		return Void();
 	}
 };
-StringRef EraseLogRangeTaskFunc::name = LiteralStringRef("dr_erase_log_range");
+StringRef EraseLogRangeTaskFunc::name = "dr_erase_log_range"_sr;
 REGISTER_TASKFUNC(EraseLogRangeTaskFunc);
 
 struct CopyLogRangeTaskFunc : TaskFuncBase {
@@ -704,7 +704,7 @@ struct CopyLogRangeTaskFunc : TaskFuncBase {
 	static constexpr uint32_t version = 1;
 
 	static struct {
-		static TaskParam<int64_t> bytesWritten() { return LiteralStringRef(__FUNCTION__); }
+		static TaskParam<int64_t> bytesWritten() { return __FUNCTION__sr; }
 	} Params;
 
 	static const Key keyNextBeginVersion;
@@ -786,7 +786,7 @@ struct CopyLogRangeTaskFunc : TaskFuncBase {
 				loop {
 					try {
 						tr.setOption(FDBTransactionOptions::LOCK_AWARE);
-						tr.options.sizeLimit = 2 * CLIENT_KNOBS->TRANSACTION_SIZE_LIMIT;
+						tr.trState->options.sizeLimit = 2 * CLIENT_KNOBS->TRANSACTION_SIZE_LIMIT;
 						wait(checkDatabaseLock(&tr,
 						                       BinaryReader::fromStringRef<UID>(
 						                           task->params[BackupAgentBase::keyConfigLogUid], Unversioned())));
@@ -957,7 +957,7 @@ struct CopyLogRangeTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	ACTOR static Future<Void> _finish(Reference<ReadYourWritesTransaction> tr,
@@ -988,8 +988,8 @@ struct CopyLogRangeTaskFunc : TaskFuncBase {
 		return Void();
 	}
 };
-StringRef CopyLogRangeTaskFunc::name = LiteralStringRef("dr_copy_log_range");
-const Key CopyLogRangeTaskFunc::keyNextBeginVersion = LiteralStringRef("nextBeginVersion");
+StringRef CopyLogRangeTaskFunc::name = "dr_copy_log_range"_sr;
+const Key CopyLogRangeTaskFunc::keyNextBeginVersion = "nextBeginVersion"_sr;
 REGISTER_TASKFUNC(CopyLogRangeTaskFunc);
 
 struct CopyLogsTaskFunc : TaskFuncBase {
@@ -1124,7 +1124,7 @@ struct CopyLogsTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	StringRef getName() const override { return name; };
@@ -1142,7 +1142,7 @@ struct CopyLogsTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef CopyLogsTaskFunc::name = LiteralStringRef("dr_copy_logs");
+StringRef CopyLogsTaskFunc::name = "dr_copy_logs"_sr;
 REGISTER_TASKFUNC(CopyLogsTaskFunc);
 
 struct FinishedFullBackupTaskFunc : TaskFuncBase {
@@ -1234,7 +1234,7 @@ struct FinishedFullBackupTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	ACTOR static Future<Void> _finish(Reference<ReadYourWritesTransaction> tr,
@@ -1282,8 +1282,8 @@ struct FinishedFullBackupTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef FinishedFullBackupTaskFunc::name = LiteralStringRef("dr_finished_full_backup");
-const Key FinishedFullBackupTaskFunc::keyInsertTask = LiteralStringRef("insertTask");
+StringRef FinishedFullBackupTaskFunc::name = "dr_finished_full_backup"_sr;
+const Key FinishedFullBackupTaskFunc::keyInsertTask = "insertTask"_sr;
 REGISTER_TASKFUNC(FinishedFullBackupTaskFunc);
 
 struct CopyDiffLogsTaskFunc : TaskFuncBase {
@@ -1395,7 +1395,7 @@ struct CopyDiffLogsTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	StringRef getName() const override { return name; };
@@ -1413,7 +1413,7 @@ struct CopyDiffLogsTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef CopyDiffLogsTaskFunc::name = LiteralStringRef("dr_copy_diff_logs");
+StringRef CopyDiffLogsTaskFunc::name = "dr_copy_diff_logs"_sr;
 REGISTER_TASKFUNC(CopyDiffLogsTaskFunc);
 
 // Skip unneeded EraseLogRangeTaskFunc in 5.1
@@ -1445,7 +1445,7 @@ struct SkipOldEraseLogRangeTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef SkipOldEraseLogRangeTaskFunc::name = LiteralStringRef("dr_skip_legacy_task");
+StringRef SkipOldEraseLogRangeTaskFunc::name = "dr_skip_legacy_task"_sr;
 REGISTER_TASKFUNC(SkipOldEraseLogRangeTaskFunc);
 REGISTER_TASKFUNC_ALIAS(SkipOldEraseLogRangeTaskFunc, db_erase_log_range);
 
@@ -1455,7 +1455,7 @@ struct OldCopyLogRangeTaskFunc : TaskFuncBase {
 	static constexpr uint32_t version = 1;
 
 	static struct {
-		static TaskParam<int64_t> bytesWritten() { return LiteralStringRef(__FUNCTION__); }
+		static TaskParam<int64_t> bytesWritten() { return __FUNCTION__sr; }
 	} Params;
 
 	static const Key keyNextBeginVersion;
@@ -1531,7 +1531,7 @@ struct OldCopyLogRangeTaskFunc : TaskFuncBase {
 				loop {
 					try {
 						tr.setOption(FDBTransactionOptions::LOCK_AWARE);
-						tr.options.sizeLimit = 2 * CLIENT_KNOBS->TRANSACTION_SIZE_LIMIT;
+						tr.trState->options.sizeLimit = 2 * CLIENT_KNOBS->TRANSACTION_SIZE_LIMIT;
 						wait(checkDatabaseLock(&tr,
 						                       BinaryReader::fromStringRef<UID>(
 						                           task->params[BackupAgentBase::keyConfigLogUid], Unversioned())));
@@ -1651,7 +1651,7 @@ struct OldCopyLogRangeTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	ACTOR static Future<Void> _finish(Reference<ReadYourWritesTransaction> tr,
@@ -1682,8 +1682,8 @@ struct OldCopyLogRangeTaskFunc : TaskFuncBase {
 		return Void();
 	}
 };
-StringRef OldCopyLogRangeTaskFunc::name = LiteralStringRef("db_copy_log_range");
-const Key OldCopyLogRangeTaskFunc::keyNextBeginVersion = LiteralStringRef("nextBeginVersion");
+StringRef OldCopyLogRangeTaskFunc::name = "db_copy_log_range"_sr;
+const Key OldCopyLogRangeTaskFunc::keyNextBeginVersion = "nextBeginVersion"_sr;
 REGISTER_TASKFUNC(OldCopyLogRangeTaskFunc);
 
 struct AbortOldBackupTaskFunc : TaskFuncBase {
@@ -1752,7 +1752,7 @@ struct AbortOldBackupTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	StringRef getName() const override { return name; };
@@ -1770,7 +1770,7 @@ struct AbortOldBackupTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef AbortOldBackupTaskFunc::name = LiteralStringRef("dr_abort_legacy_backup");
+StringRef AbortOldBackupTaskFunc::name = "dr_abort_legacy_backup"_sr;
 REGISTER_TASKFUNC(AbortOldBackupTaskFunc);
 REGISTER_TASKFUNC_ALIAS(AbortOldBackupTaskFunc, db_backup_range);
 REGISTER_TASKFUNC_ALIAS(AbortOldBackupTaskFunc, db_finish_full_backup);
@@ -1833,13 +1833,16 @@ struct CopyDiffLogsUpgradeTaskFunc : TaskFuncBase {
 					return Void();
 				}
 
-				if (backupRanges.size() == 1) {
+				if (backupRanges.size() == 1 || isDefaultBackup(backupRanges)) {
 					RangeResult existingDestUidValues = wait(srcTr->getRange(
 					    KeyRangeRef(destUidLookupPrefix, strinc(destUidLookupPrefix)), CLIENT_KNOBS->TOO_MANY));
 					bool found = false;
+					KeyRangeRef targetRange =
+					    (backupRanges.size() == 1) ? backupRanges[0] : getDefaultBackupSharedRange();
 					for (auto it : existingDestUidValues) {
-						if (BinaryReader::fromStringRef<KeyRange>(it.key.removePrefix(destUidLookupPrefix),
-						                                          IncludeVersion()) == backupRanges[0]) {
+						KeyRange uidRange = BinaryReader::fromStringRef<KeyRange>(
+						    it.key.removePrefix(destUidLookupPrefix), IncludeVersion());
+						if (uidRange == targetRange) {
 							if (destUidValue != it.value) {
 								// existing backup/DR is running
 								return Void();
@@ -1855,7 +1858,7 @@ struct CopyDiffLogsUpgradeTaskFunc : TaskFuncBase {
 					}
 
 					srcTr->set(
-					    BinaryWriter::toValue(backupRanges[0], IncludeVersion(ProtocolVersion::withSharedMutations()))
+					    BinaryWriter::toValue(targetRange, IncludeVersion(ProtocolVersion::withSharedMutations()))
 					        .withPrefix(destUidLookupPrefix),
 					    destUidValue);
 				}
@@ -1917,7 +1920,7 @@ struct CopyDiffLogsUpgradeTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef CopyDiffLogsUpgradeTaskFunc::name = LiteralStringRef("db_copy_diff_logs");
+StringRef CopyDiffLogsUpgradeTaskFunc::name = "db_copy_diff_logs"_sr;
 REGISTER_TASKFUNC(CopyDiffLogsUpgradeTaskFunc);
 
 struct BackupRestorableTaskFunc : TaskFuncBase {
@@ -2030,7 +2033,7 @@ struct BackupRestorableTaskFunc : TaskFuncBase {
 		                           task,
 		                           parentTask->params[Task::reservedTaskParamValidKey],
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	StringRef getName() const override { return name; };
@@ -2048,7 +2051,7 @@ struct BackupRestorableTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef BackupRestorableTaskFunc::name = LiteralStringRef("dr_backup_restorable");
+StringRef BackupRestorableTaskFunc::name = "dr_backup_restorable"_sr;
 REGISTER_TASKFUNC(BackupRestorableTaskFunc);
 
 struct StartFullBackupTaskFunc : TaskFuncBase {
@@ -2077,24 +2080,29 @@ struct StartFullBackupTaskFunc : TaskFuncBase {
 				srcTr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 
 				// Initialize destUid
-				if (backupRanges.size() == 1) {
+				if (backupRanges.size() == 1 || isDefaultBackup(backupRanges)) {
 					RangeResult existingDestUidValues = wait(srcTr->getRange(
 					    KeyRangeRef(destUidLookupPrefix, strinc(destUidLookupPrefix)), CLIENT_KNOBS->TOO_MANY));
+					KeyRangeRef targetRange =
+					    (backupRanges.size() == 1) ? backupRanges[0] : getDefaultBackupSharedRange();
 					bool found = false;
 					for (auto it : existingDestUidValues) {
-						if (BinaryReader::fromStringRef<KeyRange>(it.key.removePrefix(destUidLookupPrefix),
-						                                          IncludeVersion()) == backupRanges[0]) {
+						KeyRange uidRange = BinaryReader::fromStringRef<KeyRange>(
+						    it.key.removePrefix(destUidLookupPrefix), IncludeVersion());
+						if (uidRange == targetRange) {
 							destUidValue = it.value;
 							found = true;
+							CODE_PROBE(targetRange == getDefaultBackupSharedRange(),
+							           "DR mutation sharing with default backup");
 							break;
 						}
 					}
 					if (!found) {
 						destUidValue = BinaryWriter::toValue(deterministicRandom()->randomUniqueID(), Unversioned());
-						srcTr->set(BinaryWriter::toValue(backupRanges[0],
-						                                 IncludeVersion(ProtocolVersion::withSharedMutations()))
-						               .withPrefix(destUidLookupPrefix),
-						           destUidValue);
+						srcTr->set(
+						    BinaryWriter::toValue(targetRange, IncludeVersion(ProtocolVersion::withSharedMutations()))
+						        .withPrefix(destUidLookupPrefix),
+						    destUidValue);
 					}
 				}
 
@@ -2142,7 +2150,7 @@ struct StartFullBackupTaskFunc : TaskFuncBase {
 				wait(tr->commit());
 				break;
 			} catch (Error& e) {
-				TraceEvent("SetDestUidOrBeginVersionError").error(e, true);
+				TraceEvent("SetDestUidOrBeginVersionError").errorUnsuppressed(e);
 				wait(tr->onError(e));
 			}
 		}
@@ -2280,7 +2288,7 @@ struct StartFullBackupTaskFunc : TaskFuncBase {
 		task->params[BackupAgentBase::keyConfigBackupRanges] = keyConfigBackupRanges;
 		task->params[BackupAgentBase::keyTagName] = tagName;
 		task->params[DatabaseBackupAgent::keyDatabasesInSync] =
-		    backupAction == DatabaseBackupAgent::PreBackupAction::NONE ? LiteralStringRef("t") : LiteralStringRef("f");
+		    backupAction == DatabaseBackupAgent::PreBackupAction::NONE ? "t"_sr : "f"_sr;
 
 		if (!waitFor) {
 			return taskBucket->addTask(tr,
@@ -2300,7 +2308,7 @@ struct StartFullBackupTaskFunc : TaskFuncBase {
 		                               .get(logUid)
 		                               .pack(BackupAgentBase::keyFolderId),
 		                           task->params[BackupAgentBase::keyFolderId]));
-		return LiteralStringRef("OnSetAddTask");
+		return "OnSetAddTask"_sr;
 	}
 
 	StringRef getName() const override { return name; };
@@ -2318,7 +2326,7 @@ struct StartFullBackupTaskFunc : TaskFuncBase {
 		return _finish(tr, tb, fb, task);
 	};
 };
-StringRef StartFullBackupTaskFunc::name = LiteralStringRef("dr_start_full_backup");
+StringRef StartFullBackupTaskFunc::name = "dr_start_full_backup"_sr;
 REGISTER_TASKFUNC(StartFullBackupTaskFunc);
 } // namespace dbBackup
 
@@ -2366,7 +2374,7 @@ std::string getDRMutationStreamId(StatusObjectReader statusObj, const char* cont
 bool getLockedStatus(StatusObjectReader statusObj) {
 	try {
 		StatusObjectReader statusObjCluster = statusObj["cluster"].get_obj();
-		return statusObjCluster["database_locked"].get_bool();
+		return statusObjCluster["database_lock_state.locked"].get_bool();
 	} catch (std::runtime_error& e) {
 		TraceEvent(SevWarn, "DBA_GetLockedStatusFail").detail("Error", e.what());
 		throw backup_error();
@@ -2624,7 +2632,7 @@ public:
 
 		int64_t startCount = 0;
 		state Key mapPrefix = logUidValue.withPrefix(applyMutationsKeyVersionMapRange.begin);
-		Key mapEnd = normalKeys.end.withPrefix(mapPrefix);
+		Key mapEnd = allKeys.end.withPrefix(mapPrefix);
 		tr->set(logUidValue.withPrefix(applyMutationsAddPrefixRange.begin), addPrefix);
 		tr->set(logUidValue.withPrefix(applyMutationsRemovePrefixRange.begin), removePrefix);
 		tr->set(logUidValue.withPrefix(applyMutationsKeyVersionCountRange.begin), StringRef((uint8_t*)&startCount, 8));
@@ -2779,7 +2787,7 @@ public:
 				Version destVersion = wait(tr3.getReadVersion());
 				TraceEvent("DBA_SwitchoverVersionUpgrade").detail("Src", commitVersion).detail("Dest", destVersion);
 				if (destVersion <= commitVersion) {
-					TEST(true); // Forcing dest backup cluster to higher version
+					CODE_PROBE(true, "Forcing dest backup cluster to higher version");
 					tr3.set(minRequiredCommitVersionKey, BinaryWriter::toValue(commitVersion + 1, Unversioned()));
 					wait(tr3.commit());
 				} else {
@@ -2907,7 +2915,7 @@ public:
 				TraceEvent("DBA_Abort").detail("CommitVersion", tr->getCommittedVersion());
 				break;
 			} catch (Error& e) {
-				TraceEvent("DBA_AbortError").error(e, true);
+				TraceEvent("DBA_AbortError").errorUnsuppressed(e);
 				wait(tr->onError(e));
 			}
 		}
@@ -2932,7 +2940,7 @@ public:
 					Version applied = BinaryReader::fromStringRef<Version>(lastApplied.get(), Unversioned());
 					TraceEvent("DBA_AbortVersionUpgrade").detail("Src", applied).detail("Dest", current);
 					if (current <= applied) {
-						TEST(true); // Upgrading version of local database.
+						CODE_PROBE(true, "Upgrading version of local database.");
 						// The +1 is because we want to make sure that a versionstamped operation can't reuse
 						// the same version as an already-applied transaction.
 						tr->set(minRequiredCommitVersionKey, BinaryWriter::toValue(applied + 1, Unversioned()));
@@ -3060,6 +3068,9 @@ public:
 
 		loop {
 			try {
+				tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+				tr->setOption(FDBTransactionOptions::LOCK_AWARE);
+
 				wait(success(tr->getReadVersion())); // get the read version before getting a version from the source
 				                                     // database to prevent the time differential from going negative
 
@@ -3070,9 +3081,6 @@ public:
 				statusText = "";
 
 				state UID logUid = wait(backupAgent->getLogUid(tr, tagName));
-
-				tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
-				tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 
 				state Future<Optional<Value>> fPaused = tr->get(backupAgent->taskBucket->getPauseKey());
 				state Future<RangeResult> fErrorValues =
@@ -3096,7 +3104,7 @@ public:
 				state Future<Optional<Key>> fBackupKeysPacked =
 				    tr->get(backupAgent->config.get(BinaryWriter::toValue(logUid, Unversioned()))
 				                .pack(BackupAgentBase::keyConfigBackupRanges));
-				state Future<Optional<Value>> flogVersionKey = 
+				state Future<Optional<Value>> flogVersionKey =
 				    tr->get(backupAgent->states.get(BinaryWriter::toValue(logUid, Unversioned()))
 				                .pack(BackupAgentBase::keyStateLogBeginVersion));
 
@@ -3115,13 +3123,11 @@ public:
 
 					state Optional<Value> stopVersionKey = wait(fStopVersionKey);
 					Optional<Value> logVersionKey = wait(flogVersionKey);
-					state std::string logVersionText
-					    = ". Last log version is " 
-					      + (
-						logVersionKey.present()
-					        ? format("%lld", BinaryReader::fromStringRef<Version>(logVersionKey.get(), Unversioned()))
-					        : "unset"
-					      );
+					state std::string logVersionText =
+					    ". Last log version is " +
+					    (logVersionKey.present()
+					         ? format("%lld", BinaryReader::fromStringRef<Version>(logVersionKey.get(), Unversioned()))
+					         : "unset");
 					Optional<Key> backupKeysPacked = wait(fBackupKeysPacked);
 
 					state Standalone<VectorRef<KeyRangeRef>> backupRanges;
@@ -3140,8 +3146,8 @@ public:
 						    "The DR on tag `" + tagNameDisplay + "' is NOT a complete copy of the primary database.\n";
 						break;
 					case EBackupState::STATE_RUNNING_DIFFERENTIAL:
-						statusText +=
-						    "The DR on tag `" + tagNameDisplay + "' is a complete copy of the primary database" + logVersionText + ".\n";
+						statusText += "The DR on tag `" + tagNameDisplay +
+						              "' is a complete copy of the primary database" + logVersionText + ".\n";
 						break;
 					case EBackupState::STATE_COMPLETED: {
 						Version stopVersion =

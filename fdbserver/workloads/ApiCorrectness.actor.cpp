@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,11 +31,12 @@ enum OperationType { SET, GET, GET_RANGE, GET_RANGE_SELECTOR, GET_KEY, CLEAR, CL
 
 // A workload that executes the NativeAPIs functions and verifies that their outcomes are correct
 struct ApiCorrectnessWorkload : ApiWorkload {
+	static constexpr auto NAME = "ApiCorrectness";
 
 private:
 // Enable to track the activity on a particular key
 #if CENABLED(0, NOT_IN_CLEAN)
-#define targetKey LiteralStringRef( ??? )
+#define targetKey "???"_sr
 
 	void debugKey(KeyRef key, std::string context) {
 		if (key == targetKey)
@@ -99,21 +100,21 @@ public:
 
 	ApiCorrectnessWorkload(WorkloadContext const& wcx)
 	  : ApiWorkload(wcx), numRandomOperations("Num Random Operations") {
-		numGets = getOption(options, LiteralStringRef("numGets"), 1000);
-		numGetRanges = getOption(options, LiteralStringRef("numGetRanges"), 100);
-		numGetRangeSelectors = getOption(options, LiteralStringRef("numGetRangeSelectors"), 100);
-		numGetKeys = getOption(options, LiteralStringRef("numGetKeys"), 100);
-		numClears = getOption(options, LiteralStringRef("numClears"), 100);
-		numClearRanges = getOption(options, LiteralStringRef("numClearRanges"), 100);
-		minSizeAfterClear = getOption(options, LiteralStringRef("minSizeAfterClear"), (int)(0.1 * numKeys));
+		numGets = getOption(options, "numGets"_sr, 1000);
+		numGetRanges = getOption(options, "numGetRanges"_sr, 100);
+		numGetRangeSelectors = getOption(options, "numGetRangeSelectors"_sr, 100);
+		numGetKeys = getOption(options, "numGetKeys"_sr, 100);
+		numClears = getOption(options, "numClears"_sr, 100);
+		numClearRanges = getOption(options, "numClearRanges"_sr, 100);
+		minSizeAfterClear = getOption(options, "minSizeAfterClear"_sr, (int)(0.1 * numKeys));
 
-		maxRandomTestKeys = getOption(options, LiteralStringRef("maxRandomTestKeys"), numKeys);
-		randomTestDuration = getOption(options, LiteralStringRef("randomTestDuration"), 60.0);
+		maxRandomTestKeys = getOption(options, "maxRandomTestKeys"_sr, numKeys);
+		randomTestDuration = getOption(options, "randomTestDuration"_sr, 60.0);
 
-		int maxTransactionBytes = getOption(options, LiteralStringRef("maxTransactionBytes"), 500000);
+		int maxTransactionBytes = getOption(options, "maxTransactionBytes"_sr, 500000);
 		maxKeysPerTransaction = std::max(1, maxTransactionBytes / (maxValueLength + maxLongKeyLength));
 
-		resetDBTimeout = getOption(options, LiteralStringRef("resetDBTimeout"), 1800.0);
+		resetDBTimeout = getOption(options, "resetDBTimeout"_sr, 1800.0);
 
 		if (maxTransactionBytes > 500000) {
 			TraceEvent("RemapEventSeverity")
@@ -137,10 +138,8 @@ public:
 
 	~ApiCorrectnessWorkload() override {}
 
-	std::string description() const override { return "ApiCorrectness"; }
-
-	void getMetrics(vector<PerfMetric>& m) override {
-		m.push_back(PerfMetric("Number of Random Operations Performed", numRandomOperations.getValue(), false));
+	void getMetrics(std::vector<PerfMetric>& m) override {
+		m.emplace_back("Number of Random Operations Performed", numRandomOperations.getValue(), Averaged::False);
 	}
 
 	ACTOR Future<Void> performSetup(Database cx, ApiCorrectnessWorkload* self) {
@@ -244,7 +243,7 @@ public:
 				               20,
 				               (int)(100 * (1 - setProbability)),
 				               (int)(10 * (1 - setProbability)) };
-			vector<int> pdf = vector<int>(pdfArray, pdfArray + 8);
+			std::vector<int> pdf = std::vector<int>(pdfArray, pdfArray + 8);
 
 			OperationType operation = UNINITIALIZED;
 
@@ -388,7 +387,7 @@ public:
 		for (int i = 0; i < numReads; i++)
 			keys.push_back_deep(keys.arena(), self->selectRandomKey(data, 0.9));
 
-		state vector<Optional<Value>> values;
+		state std::vector<Optional<Value>> values;
 
 		state int currentIndex = 0;
 		while (currentIndex < keys.size()) {
@@ -397,7 +396,7 @@ public:
 			// Get the values from the database
 			loop {
 				try {
-					state vector<Future<Optional<Value>>> dbValueFutures;
+					state std::vector<Future<Optional<Value>>> dbValueFutures;
 					for (int i = currentIndex; i < std::min(currentIndex + self->maxKeysPerTransaction, keys.size());
 					     i++)
 						dbValueFutures.push_back(transaction->get(keys[i]));
@@ -435,7 +434,7 @@ public:
 	// Gets a single range of values from the database and memory stores and compares them, returning true if the
 	// results were the same
 	ACTOR Future<bool> runGetRange(VectorRef<KeyValueRef> data, ApiCorrectnessWorkload* self) {
-		state Reverse reverse = deterministicRandom()->coinflip();
+		state Reverse reverse(deterministicRandom()->coinflip());
 
 		// Generate a random range
 		Key key = self->selectRandomKey(data, 0.5);
@@ -481,7 +480,7 @@ public:
 	// Gets a single range of values using key selectors from the database and memory store and compares them, returning
 	// true if the results were the same
 	ACTOR Future<bool> runGetRangeSelector(VectorRef<KeyValueRef> data, ApiCorrectnessWorkload* self) {
-		state Reverse reverse = deterministicRandom()->coinflip();
+		state Reverse reverse(deterministicRandom()->coinflip());
 
 		KeySelector selectors[2];
 		Key keys[2];
@@ -502,7 +501,7 @@ public:
 
 				if (keys[i].startsWith(StringRef(self->clientPrefix)) ||
 				    (keys[i].size() == 0 && self->clientPrefixInt == 0) ||
-				    (keys[i].startsWith(LiteralStringRef("\xff")) && self->clientPrefixInt == self->clientCount - 1)) {
+				    (keys[i].startsWith("\xff"_sr) && self->clientPrefixInt == self->clientCount - 1)) {
 					break;
 				}
 
@@ -553,7 +552,7 @@ public:
 				if (endKey == self->store.endKey()) {
 					for (int i = 0; i < range.size(); i++) {
 						// Don't include results in the 0xFF key-space
-						if (!range[i].key.startsWith(LiteralStringRef("\xff")))
+						if (!range[i].key.startsWith("\xff"_sr))
 							dbResults.push_back_deep(dbResults.arena(), range[i]);
 					}
 					if (reverse && dbResults.size() < storeResults.size()) {
@@ -594,7 +593,7 @@ public:
 
 			loop {
 				try {
-					state vector<Future<Standalone<KeyRef>>> dbKeyFutures;
+					state std::vector<Future<Standalone<KeyRef>>> dbKeyFutures;
 					for (int i = currentIndex;
 					     i < std::min(currentIndex + self->maxKeysPerTransaction, selectors.size());
 					     i++)
@@ -765,4 +764,4 @@ public:
 	}
 };
 
-WorkloadFactory<ApiCorrectnessWorkload> ApiCorrectnessWorkloadFactory("ApiCorrectness");
+WorkloadFactory<ApiCorrectnessWorkload> ApiCorrectnessWorkloadFactory;

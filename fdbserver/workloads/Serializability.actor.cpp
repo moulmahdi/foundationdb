@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct SerializabilityWorkload : TestWorkload {
+	static constexpr auto NAME = "Serializability";
+
 	double testDuration;
 	bool adjacentKeys;
 	int nodes;
@@ -65,9 +67,9 @@ struct SerializabilityWorkload : TestWorkload {
 	};
 
 	SerializabilityWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), success(true) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 30.0);
-		numOps = getOption(options, LiteralStringRef("numOps"), 21);
-		nodes = getOption(options, LiteralStringRef("nodes"), 1000);
+		testDuration = getOption(options, "testDuration"_sr, 30.0);
+		numOps = getOption(options, "numOps"_sr, 21);
+		nodes = getOption(options, "nodes"_sr, 1000);
 
 		adjacentKeys = false; // deterministicRandom()->random01() < 0.5;
 		valueSizeRange = std::make_pair(0, 100);
@@ -83,8 +85,6 @@ struct SerializabilityWorkload : TestWorkload {
 			    .detail("MaxClearSize", maxClearSize);
 	}
 
-	std::string description() const override { return "Serializability"; }
-
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
 	Future<Void> start(Database const& cx) override {
@@ -95,7 +95,7 @@ struct SerializabilityWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return success; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	Value getRandomValue() const {
 		return Value(
@@ -531,4 +531,4 @@ struct SerializabilityWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<SerializabilityWorkload> SerializabilityWorkloadFactory("Serializability");
+WorkloadFactory<SerializabilityWorkload> SerializabilityWorkloadFactory;

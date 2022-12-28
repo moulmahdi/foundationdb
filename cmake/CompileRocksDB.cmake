@@ -1,32 +1,45 @@
 # FindRocksDB
 
-find_package(RocksDB)
+find_package(RocksDB 7.7.3)
 
 include(ExternalProject)
 
-if (RocksDB_FOUND)
+set(RocksDB_CMAKE_ARGS
+  -DUSE_RTTI=1
+  -DPORTABLE=${PORTABLE_ROCKSDB}
+  -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+  -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+  -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+  -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+  -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
+  -DCMAKE_SHARED_LINKER_FLAGS=${CMAKE_SHARED_LINKER_FLAGS}
+  -DCMAKE_STATIC_LINKER_FLAGS=${CMAKE_STATIC_LINKER_FLAGS}
+  -DCMAKE_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}
+  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+  -DFAIL_ON_WARNINGS=OFF
+  -DWITH_GFLAGS=OFF
+  -DWITH_TESTS=OFF
+  -DWITH_TOOLS=OFF
+  -DWITH_CORE_TOOLS=OFF
+  -DWITH_BENCHMARK_TOOLS=OFF
+  -DWITH_BZ2=OFF
+  -DWITH_LZ4=ON
+  -DWITH_SNAPPY=OFF
+  -DWITH_ZLIB=OFF
+  -DWITH_ZSTD=OFF
+  -DWITH_LIBURING=${WITH_LIBURING}
+  -DWITH_TSAN=${USE_TSAN}
+  -DWITH_ASAN=${USE_ASAN}
+  -DWITH_UBSAN=${USE_UBSAN}
+  -DROCKSDB_BUILD_SHARED=OFF
+  -DCMAKE_POSITION_INDEPENDENT_CODE=True
+)
+
+if(ROCKSDB_FOUND)
   ExternalProject_Add(rocksdb
     SOURCE_DIR "${RocksDB_ROOT}"
     DOWNLOAD_COMMAND ""
-    CMAKE_ARGS -DUSE_RTTI=1 -DPORTABLE=${PORTABLE_ROCKSDB}
-               -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
-               -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-               -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-               -DWITH_GFLAGS=OFF
-               -DWITH_TESTS=OFF
-               -DWITH_TOOLS=OFF
-               -DWITH_CORE_TOOLS=OFF
-               -DWITH_BENCHMARK_TOOLS=OFF
-               -DWITH_BZ2=OFF
-               -DWITH_LZ4=ON
-               -DWITH_SNAPPY=OFF
-               -DWITH_ZLIB=OFF
-               -DWITH_ZSTD=OFF
-               -DWITH_TSAN=${USE_TSAN}
-               -DWITH_ASAN=${USE_ASAN}
-               -DWITH_UBSAN=${USE_UBSAN}
-               -DROCKSDB_BUILD_SHARED=OFF
-               -DCMAKE_POSITION_INDEPENDENT_CODE=True
+    CMAKE_ARGS ${RocksDB_CMAKE_ARGS}
     BUILD_BYPRODUCTS <BINARY_DIR>/librocksdb.a
     INSTALL_COMMAND ""
   )
@@ -36,27 +49,9 @@ if (RocksDB_FOUND)
       ${BINARY_DIR}/librocksdb.a)
 else()
   ExternalProject_Add(rocksdb
-    URL        https://github.com/facebook/rocksdb/archive/v6.22.1.tar.gz
-    URL_HASH   SHA256=2df8f34a44eda182e22cf84dee7a14f17f55d305ff79c06fb3cd1e5f8831e00d
-    CMAKE_ARGS -DUSE_RTTI=1 -DPORTABLE=${PORTABLE_ROCKSDB}
-               -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
-               -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-               -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-               -DWITH_GFLAGS=OFF
-               -DWITH_TESTS=OFF
-               -DWITH_TOOLS=OFF
-               -DWITH_CORE_TOOLS=OFF
-               -DWITH_BENCHMARK_TOOLS=OFF
-               -DWITH_BZ2=OFF
-               -DWITH_LZ4=ON
-               -DWITH_SNAPPY=OFF
-               -DWITH_ZLIB=OFF
-               -DWITH_ZSTD=OFF
-               -DWITH_TSAN=${USE_TSAN}
-               -DWITH_ASAN=${USE_ASAN}
-               -DWITH_UBSAN=${USE_UBSAN}
-               -DROCKSDB_BUILD_SHARED=OFF
-               -DCMAKE_POSITION_INDEPENDENT_CODE=True
+    URL https://github.com/facebook/rocksdb/archive/refs/tags/v7.7.3.tar.gz
+    URL_HASH SHA256=b8ac9784a342b2e314c821f6d701148912215666ac5e9bdbccd93cf3767cb611
+    CMAKE_ARGS ${RocksDB_CMAKE_ARGS}
     BUILD_BYPRODUCTS <BINARY_DIR>/librocksdb.a
     INSTALL_COMMAND ""
   )
@@ -66,7 +61,7 @@ else()
       ${BINARY_DIR}/librocksdb.a)
 
   ExternalProject_Get_Property(rocksdb SOURCE_DIR)
-  set (ROCKSDB_INCLUDE_DIR "${SOURCE_DIR}/include")
+  set(ROCKSDB_INCLUDE_DIR "${SOURCE_DIR}/include")
 
   set(ROCKSDB_FOUND TRUE)
 endif()

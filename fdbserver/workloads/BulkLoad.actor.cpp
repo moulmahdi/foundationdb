@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,37 +18,35 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct BulkLoadWorkload : TestWorkload {
+	static constexpr auto NAME = "BulkLoad";
 	int clientCount, actorCount, writesPerTransaction, valueBytes;
 	double testDuration;
 	Value value;
 	uint64_t targetBytes;
 	Key keyPrefix;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, retries;
-	ContinuousSample<double> latencies;
+	DDSketch<double> latencies;
 
 	BulkLoadWorkload(WorkloadContext const& wcx)
-	  : TestWorkload(wcx), clientCount(wcx.clientCount), transactions("Transactions"), retries("Retries"),
-	    latencies(2000) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		actorCount = getOption(options, LiteralStringRef("actorCount"), 20);
-		writesPerTransaction = getOption(options, LiteralStringRef("writesPerTransaction"), 10);
-		valueBytes = std::max(getOption(options, LiteralStringRef("valueBytes"), 96), 16);
+	  : TestWorkload(wcx), clientCount(wcx.clientCount), transactions("Transactions"), retries("Retries"), latencies() {
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		actorCount = getOption(options, "actorCount"_sr, 20);
+		writesPerTransaction = getOption(options, "writesPerTransaction"_sr, 10);
+		valueBytes = std::max(getOption(options, "valueBytes"_sr, 96), 16);
 		value = Value(std::string(valueBytes, '.'));
-		targetBytes = getOption(options, LiteralStringRef("targetBytes"), std::numeric_limits<uint64_t>::max());
-		keyPrefix = getOption(options, LiteralStringRef("keyPrefix"), LiteralStringRef(""));
+		targetBytes = getOption(options, "targetBytes"_sr, std::numeric_limits<uint64_t>::max());
+		keyPrefix = getOption(options, "keyPrefix"_sr, ""_sr);
 		keyPrefix = unprintable(keyPrefix.toString());
 	}
-
-	std::string description() const override { return "BulkLoad"; }
 
 	Future<Void> start(Database const& cx) override {
 		for (int c = 0; c < actorCount; c++)
@@ -61,20 +59,21 @@ struct BulkLoadWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
-		m.push_back(PerfMetric("Rows written", transactions.getValue() * writesPerTransaction, false));
-		m.push_back(PerfMetric("Transactions/sec", transactions.getValue() / testDuration, false));
-		m.push_back(PerfMetric("Write rows/sec", transactions.getValue() * writesPerTransaction / testDuration, false));
+		m.emplace_back("Rows written", transactions.getValue() * writesPerTransaction, Averaged::False);
+		m.emplace_back("Transactions/sec", transactions.getValue() / testDuration, Averaged::False);
+		m.emplace_back(
+		    "Write rows/sec", transactions.getValue() * writesPerTransaction / testDuration, Averaged::False);
 		double keysPerSecond = transactions.getValue() * writesPerTransaction / testDuration;
-		m.push_back(PerfMetric("Keys written/sec", keysPerSecond, false));
-		m.push_back(PerfMetric("Bytes written/sec", keysPerSecond * (valueBytes + 16), false));
+		m.emplace_back("Keys written/sec", keysPerSecond, Averaged::False);
+		m.emplace_back("Bytes written/sec", keysPerSecond * (valueBytes + 16), Averaged::False);
 
-		m.push_back(PerfMetric("Mean Latency (ms)", 1000 * latencies.mean(), true));
-		m.push_back(PerfMetric("Median Latency (ms, averaged)", 1000 * latencies.median(), true));
-		m.push_back(PerfMetric("90% Latency (ms, averaged)", 1000 * latencies.percentile(0.90), true));
-		m.push_back(PerfMetric("98% Latency (ms, averaged)", 1000 * latencies.percentile(0.98), true));
+		m.emplace_back("Mean Latency (ms)", 1000 * latencies.mean(), Averaged::True);
+		m.emplace_back("Median Latency (ms, averaged)", 1000 * latencies.median(), Averaged::True);
+		m.emplace_back("90% Latency (ms, averaged)", 1000 * latencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% Latency (ms, averaged)", 1000 * latencies.percentile(0.98), Averaged::True);
 	}
 
 	ACTOR Future<Void> bulkLoadClient(Database cx, BulkLoadWorkload* self, int clientId, int actorId) {
@@ -114,4 +113,4 @@ struct BulkLoadWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<BulkLoadWorkload> BulkLoadWorkloadFactory("BulkLoad");
+WorkloadFactory<BulkLoadWorkload> BulkLoadWorkloadFactory;

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,12 @@
  */
 
 #include "fdbclient/BackupAgent.actor.h"
+#ifdef BUILD_AZURE_BACKUP
 #include "fdbclient/BackupContainerAzureBlobStore.h"
+#endif
 #include "fdbclient/BackupContainerFileSystem.h"
 #include "fdbclient/BackupContainerLocalDirectory.h"
+#include "fdbclient/BackupContainerS3BlobStore.h"
 #include "fdbclient/JsonBuilder.h"
 #include "flow/StreamCipher.h"
 #include "flow/UnitTest.h"
@@ -408,6 +411,7 @@ public:
 	                                                      Version logStartVersionOverride) {
 		state BackupDescription desc;
 		desc.url = bc->getURL();
+		desc.proxy = bc->getProxy();
 
 		TraceEvent("BackupContainerDescribe1")
 		    .detail("URL", bc->getURL())
@@ -902,6 +906,7 @@ public:
 	ACTOR static Future<Optional<RestorableFileSet>> getRestoreSet(Reference<BackupContainerFileSystem> bc,
 	                                                               Version targetVersion,
 	                                                               VectorRef<KeyRangeRef> keyRangesFilter,
+	                                                               Optional<Database> cx,
 	                                                               bool logsOnly = false,
 	                                                               Version beginVersion = invalidVersion) {
 		for (const auto& range : keyRangesFilter) {
@@ -978,7 +983,7 @@ public:
 					                       restorable.ranges.end(),
 					                       [file = rit->first](const RangeFile f) { return f.fileName == file; });
 					ASSERT(it != restorable.ranges.end());
-					KeyRange result = wait(bc->getSnapshotFileKeyRange(*it));
+					KeyRange result = wait(bc->getSnapshotFileKeyRange(*it, cx));
 					ASSERT(rit->second.begin <= result.begin && rit->second.end >= result.end);
 				}
 			}
@@ -1126,14 +1131,23 @@ public:
 		return false;
 	}
 
-#if ENCRYPTION_ENABLED
+	// fallback for using existing write api if the underlying blob store doesn't support efficient writeEntireFile
+	ACTOR static Future<Void> writeEntireFileFallback(Reference<BackupContainerFileSystem> bc,
+	                                                  std::string fileName,
+	                                                  std::string fileContents) {
+		state Reference<IBackupFile> objectFile = wait(bc->writeFile(fileName));
+		wait(objectFile->append(&fileContents[0], fileContents.size()));
+		wait(objectFile->finish());
+		return Void();
+	}
+
 	ACTOR static Future<Void> createTestEncryptionKeyFile(std::string filename) {
 		state Reference<IAsyncFile> keyFile = wait(IAsyncFileSystem::filesystem()->open(
 		    filename,
 		    IAsyncFile::OPEN_ATOMIC_WRITE_AND_CREATE | IAsyncFile::OPEN_READWRITE | IAsyncFile::OPEN_CREATE,
 		    0600));
-		StreamCipher::Key::RawKeyType testKey;
-		generateRandomData(testKey.data(), testKey.size());
+		StreamCipherKey testKey(AES_256_KEY_LENGTH);
+		testKey.initializeRandomTestKey();
 		keyFile->write(testKey.data(), testKey.size(), 0);
 		wait(keyFile->sync());
 		return Void();
@@ -1141,29 +1155,27 @@ public:
 
 	ACTOR static Future<Void> readEncryptionKey(std::string encryptionKeyFileName) {
 		state Reference<IAsyncFile> keyFile;
-		state StreamCipher::Key::RawKeyType key;
+		state StreamCipherKey const* cipherKey = StreamCipherKey::getGlobalCipherKey();
 		try {
 			Reference<IAsyncFile> _keyFile =
 			    wait(IAsyncFileSystem::filesystem()->open(encryptionKeyFileName, 0x0, 0400));
 			keyFile = _keyFile;
 		} catch (Error& e) {
 			TraceEvent(SevWarnAlways, "FailedToOpenEncryptionKeyFile")
-			    .detail("FileName", encryptionKeyFileName)
-			    .error(e);
+			    .error(e)
+			    .detail("FileName", encryptionKeyFileName);
 			throw e;
 		}
-		int bytesRead = wait(keyFile->read(key.data(), key.size(), 0));
-		if (bytesRead != key.size()) {
+		int bytesRead = wait(keyFile->read(cipherKey->data(), cipherKey->size(), 0));
+		if (bytesRead != cipherKey->size()) {
 			TraceEvent(SevWarnAlways, "InvalidEncryptionKeyFileSize")
-			    .detail("ExpectedSize", key.size())
+			    .detail("ExpectedSize", cipherKey->size())
 			    .detail("ActualSize", bytesRead);
 			throw invalid_encryption_key_file();
 		}
-		ASSERT_EQ(bytesRead, key.size());
-		StreamCipher::Key::initializeKey(std::move(key));
+		ASSERT_EQ(bytesRead, cipherKey->size());
 		return Void();
 	}
-#endif // ENCRYPTION_ENABLED
 
 }; // class BackupContainerFileSystemImpl
 
@@ -1348,7 +1360,9 @@ Future<Void> BackupContainerFileSystem::expireData(Version expireEndVersion,
 	    Reference<BackupContainerFileSystem>::addRef(this), expireEndVersion, force, progress, restorableBeginVersion);
 }
 
-ACTOR static Future<KeyRange> getSnapshotFileKeyRange_impl(Reference<BackupContainerFileSystem> bc, RangeFile file) {
+ACTOR static Future<KeyRange> getSnapshotFileKeyRange_impl(Reference<BackupContainerFileSystem> bc,
+                                                           RangeFile file,
+                                                           Optional<Database> cx) {
 	state int readFileRetries = 0;
 	state bool beginKeySet = false;
 	state Key beginKey;
@@ -1360,7 +1374,8 @@ ACTOR static Future<KeyRange> getSnapshotFileKeyRange_impl(Reference<BackupConta
 			state int64_t j = 0;
 			for (; j < file.fileSize; j += file.blockSize) {
 				int64_t len = std::min<int64_t>(file.blockSize, file.fileSize - j);
-				Standalone<VectorRef<KeyValueRef>> blockData = wait(fileBackup::decodeRangeFileBlock(inFile, j, len));
+				Standalone<VectorRef<KeyValueRef>> blockData =
+				    wait(fileBackup::decodeRangeFileBlock(inFile, j, len, cx));
 				if (!beginKeySet) {
 					beginKey = blockData.front().key;
 					beginKeySet = true;
@@ -1377,8 +1392,8 @@ ACTOR static Future<KeyRange> getSnapshotFileKeyRange_impl(Reference<BackupConta
 			           e.code() == error_code_timed_out || e.code() == error_code_lookup_failed) {
 				// blob http request failure, retry
 				TraceEvent(SevWarnAlways, "BackupContainerGetSnapshotFileKeyRangeConnectionFailure")
-				    .detail("Retries", ++readFileRetries)
-				    .error(e);
+				    .error(e)
+				    .detail("Retries", ++readFileRetries);
 				wait(delayJittered(0.1));
 			} else {
 				TraceEvent(SevError, "BackupContainerGetSnapshotFileKeyRangeUnexpectedError").error(e);
@@ -1433,17 +1448,18 @@ ACTOR static Future<Optional<Version>> readVersionProperty(Reference<BackupConta
 	}
 }
 
-Future<KeyRange> BackupContainerFileSystem::getSnapshotFileKeyRange(const RangeFile& file) {
+Future<KeyRange> BackupContainerFileSystem::getSnapshotFileKeyRange(const RangeFile& file, Optional<Database> cx) {
 	ASSERT(g_network->isSimulated());
-	return getSnapshotFileKeyRange_impl(Reference<BackupContainerFileSystem>::addRef(this), file);
+	return getSnapshotFileKeyRange_impl(Reference<BackupContainerFileSystem>::addRef(this), file, cx);
 }
 
 Future<Optional<RestorableFileSet>> BackupContainerFileSystem::getRestoreSet(Version targetVersion,
+                                                                             Optional<Database> cx,
                                                                              VectorRef<KeyRangeRef> keyRangesFilter,
                                                                              bool logsOnly,
                                                                              Version beginVersion) {
 	return BackupContainerFileSystemImpl::getRestoreSet(
-	    Reference<BackupContainerFileSystem>::addRef(this), targetVersion, keyRangesFilter, logsOnly, beginVersion);
+	    Reference<BackupContainerFileSystem>::addRef(this), targetVersion, keyRangesFilter, cx, logsOnly, beginVersion);
 }
 
 Future<Optional<Version>> BackupContainerFileSystem::VersionProperty::get() {
@@ -1478,21 +1494,119 @@ Future<Void> BackupContainerFileSystem::encryptionSetupComplete() const {
 	return encryptionSetupFuture;
 }
 
+Future<Void> BackupContainerFileSystem::writeEntireFileFallback(const std::string& fileName,
+                                                                const std::string& fileContents) {
+	return BackupContainerFileSystemImpl::writeEntireFileFallback(
+	    Reference<BackupContainerFileSystem>::addRef(this), fileName, fileContents);
+}
+
 void BackupContainerFileSystem::setEncryptionKey(Optional<std::string> const& encryptionKeyFileName) {
 	if (encryptionKeyFileName.present()) {
-#if ENCRYPTION_ENABLED
 		encryptionSetupFuture = BackupContainerFileSystemImpl::readEncryptionKey(encryptionKeyFileName.get());
-#else
-		encryptionSetupFuture = Void();
-#endif
 	}
 }
 Future<Void> BackupContainerFileSystem::createTestEncryptionKeyFile(std::string const& filename) {
-#if ENCRYPTION_ENABLED
 	return BackupContainerFileSystemImpl::createTestEncryptionKeyFile(filename);
-#else
-	return Void();
+}
+
+// Get a BackupContainerFileSystem based on a container URL string
+// TODO: refactor to not duplicate IBackupContainer::openContainer. It's the exact same
+// code but returning a different template type because you can't cast between them
+Reference<BackupContainerFileSystem> BackupContainerFileSystem::openContainerFS(
+    const std::string& url,
+    const Optional<std::string>& proxy,
+    const Optional<std::string>& encryptionKeyFileName) {
+	static std::map<std::string, Reference<BackupContainerFileSystem>> m_cache;
+
+	Reference<BackupContainerFileSystem>& r = m_cache[url];
+	if (r)
+		return r;
+
+	try {
+		StringRef u(url);
+		if (u.startsWith("file://"_sr)) {
+			r = makeReference<BackupContainerLocalDirectory>(url, encryptionKeyFileName);
+		} else if (u.startsWith("blobstore://"_sr)) {
+			std::string resource;
+
+			// The URL parameters contain blobstore endpoint tunables as well as possible backup-specific options.
+			S3BlobStoreEndpoint::ParametersT backupParams;
+			Reference<S3BlobStoreEndpoint> bstore =
+			    S3BlobStoreEndpoint::fromString(url, proxy, &resource, &lastOpenError, &backupParams);
+
+			if (resource.empty())
+				throw backup_invalid_url();
+			for (auto c : resource)
+				if (!isalnum(c) && c != '_' && c != '-' && c != '.' && c != '/')
+					throw backup_invalid_url();
+			r = makeReference<BackupContainerS3BlobStore>(bstore, resource, backupParams, encryptionKeyFileName);
+		}
+#ifdef BUILD_AZURE_BACKUP
+		else if (u.startsWith("azure://"_sr)) {
+			u.eat("azure://"_sr);
+			auto address = u.eat("/"_sr);
+			if (address.endsWith(std::string(azure::storage_lite::constants::default_endpoint_suffix))) {
+				CODE_PROBE(true, "Azure backup url with standard azure storage account endpoint");
+				// <account>.<service>.core.windows.net/<resource_path>
+				auto endPoint = address.toString();
+				auto accountName = address.eat("."_sr).toString();
+				auto containerName = u.eat("/"_sr).toString();
+				r = makeReference<BackupContainerAzureBlobStore>(
+				    endPoint, accountName, containerName, encryptionKeyFileName);
+			} else {
+				// resolve the network address if necessary
+				std::string endpoint(address.toString());
+				Optional<NetworkAddress> parsedAddress = NetworkAddress::parseOptional(endpoint);
+				if (!parsedAddress.present()) {
+					try {
+						auto hostname = Hostname::parse(endpoint);
+						auto resolvedAddress = hostname.resolveBlocking();
+						if (resolvedAddress.present()) {
+							CODE_PROBE(true, "Azure backup url with hostname in the endpoint");
+							parsedAddress = resolvedAddress.get();
+						}
+					} catch (Error& e) {
+						TraceEvent(SevError, "InvalidAzureBackupUrl").error(e).detail("Endpoint", endpoint);
+						throw backup_invalid_url();
+					}
+				}
+				if (!parsedAddress.present()) {
+					TraceEvent(SevError, "InvalidAzureBackupUrl").detail("Endpoint", endpoint);
+					throw backup_invalid_url();
+				}
+				auto accountName = u.eat("/"_sr).toString();
+				// Avoid including ":tls" and "(fromHostname)"
+				// note: the endpoint needs to contain the account name
+				// so either "<account_name>.blob.core.windows.net" or "<ip>:<port>/<account_name>"
+				endpoint =
+				    fmt::format("{}/{}", formatIpPort(parsedAddress.get().ip, parsedAddress.get().port), accountName);
+				auto containerName = u.eat("/"_sr).toString();
+				r = makeReference<BackupContainerAzureBlobStore>(
+				    endpoint, accountName, containerName, encryptionKeyFileName);
+			}
+		}
 #endif
+		else {
+			lastOpenError = "invalid URL prefix";
+			throw backup_invalid_url();
+		}
+
+		r->encryptionKeyFileName = encryptionKeyFileName;
+		r->URL = url;
+		return r;
+	} catch (Error& e) {
+		if (e.code() == error_code_actor_cancelled)
+			throw;
+
+		TraceEvent m(SevWarn, "BackupContainer");
+		m.error(e);
+		m.detail("Description", "Invalid container specification.  See help.");
+		m.detail("URL", url);
+		if (e.code() == error_code_backup_invalid_url)
+			m.detail("LastOpenError", lastOpenError);
+
+		throw;
+	}
 }
 
 namespace backup_test {
@@ -1571,7 +1685,10 @@ ACTOR static Future<Void> testWriteSnapshotFile(Reference<IBackupFile> file, Key
 	return Void();
 }
 
-ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> encryptionKeyFileName) {
+ACTOR Future<Void> testBackupContainer(std::string url,
+                                       Optional<std::string> proxy,
+                                       Optional<std::string> encryptionKeyFileName,
+                                       Optional<Database> cx) {
 	state FlowLock lock(100e6);
 
 	if (encryptionKeyFileName.present()) {
@@ -1580,7 +1697,7 @@ ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> en
 
 	printf("BackupContainerTest URL %s\n", url.c_str());
 
-	state Reference<IBackupContainer> c = IBackupContainer::openContainer(url, encryptionKeyFileName);
+	state Reference<IBackupContainer> c = IBackupContainer::openContainer(url, proxy, encryptionKeyFileName);
 
 	// Make sure container doesn't exist, then create it.
 	try {
@@ -1602,7 +1719,7 @@ ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> en
 
 	// List of sizes to use to test edge cases on underlying file implementations
 	state std::vector<int> fileSizes = { 0 };
-	if (StringRef(url).startsWith(LiteralStringRef("blob"))) {
+	if (StringRef(url).startsWith("blob"_sr)) {
 		fileSizes.push_back(CLIENT_KNOBS->BLOBSTORE_MULTIPART_MIN_PART_SIZE);
 		fileSizes.push_back(CLIENT_KNOBS->BLOBSTORE_MULTIPART_MIN_PART_SIZE + 10);
 	}
@@ -1610,8 +1727,8 @@ ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> en
 	loop {
 		state Version logStart = v;
 		state int kvfiles = deterministicRandom()->randomInt(0, 3);
-		state Key begin = LiteralStringRef("");
-		state Key end = LiteralStringRef("");
+		state Key begin = ""_sr;
+		state Key end = ""_sr;
 		state int blockSize = 3 * sizeof(uint32_t) + begin.size() + end.size() + 8;
 
 		while (kvfiles > 0) {
@@ -1678,13 +1795,13 @@ ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> en
 	for (; i < listing.snapshots.size(); ++i) {
 		{
 			// Ensure we can still restore to the latest version
-			Optional<RestorableFileSet> rest = wait(c->getRestoreSet(desc.maxRestorableVersion.get()));
+			Optional<RestorableFileSet> rest = wait(c->getRestoreSet(desc.maxRestorableVersion.get(), cx));
 			ASSERT(rest.present());
 		}
 
 		{
 			// Ensure we can restore to the end version of snapshot i
-			Optional<RestorableFileSet> rest = wait(c->getRestoreSet(listing.snapshots[i].endVersion));
+			Optional<RestorableFileSet> rest = wait(c->getRestoreSet(listing.snapshots[i].endVersion, cx));
 			ASSERT(rest.present());
 		}
 
@@ -1692,7 +1809,7 @@ ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> en
 		state Version expireVersion = listing.snapshots[i].endVersion;
 
 		// Expire everything up to but not including the snapshot end version
-		printf("EXPIRE TO %" PRId64 "\n", expireVersion);
+		fmt::print("EXPIRE TO {}\n", expireVersion);
 		state Future<Void> f = c->expireData(expireVersion);
 		wait(ready(f));
 
@@ -1725,13 +1842,16 @@ ACTOR Future<Void> testBackupContainer(std::string url, Optional<std::string> en
 }
 
 TEST_CASE("/backup/containers/localdir/unencrypted") {
-	wait(testBackupContainer(format("file://%s/fdb_backups/%llx", params.getDataDir().c_str(), timer_int()), {}));
+	wait(testBackupContainer(
+	    format("file://%s/fdb_backups/%llx", params.getDataDir().c_str(), timer_int()), {}, {}, {}));
 	return Void();
 }
 
 TEST_CASE("/backup/containers/localdir/encrypted") {
 	wait(testBackupContainer(format("file://%s/fdb_backups/%llx", params.getDataDir().c_str(), timer_int()),
-	                         format("%s/test_encryption_key", params.getDataDir().c_str())));
+	                         {},
+	                         format("%s/test_encryption_key", params.getDataDir().c_str()),
+	                         {}));
 	return Void();
 }
 
@@ -1739,7 +1859,7 @@ TEST_CASE("/backup/containers/url") {
 	if (!g_network->isSimulated()) {
 		const char* url = getenv("FDB_TEST_BACKUP_URL");
 		ASSERT(url != nullptr);
-		wait(testBackupContainer(url, {}));
+		wait(testBackupContainer(url, {}, {}, {}));
 	}
 	return Void();
 }
@@ -1749,7 +1869,7 @@ TEST_CASE("/backup/containers_list") {
 		state const char* url = getenv("FDB_TEST_BACKUP_URL");
 		ASSERT(url != nullptr);
 		printf("Listing %s\n", url);
-		std::vector<std::string> urls = wait(IBackupContainer::listContainers(url));
+		std::vector<std::string> urls = wait(IBackupContainer::listContainers(url, {}));
 		for (auto& u : urls) {
 			printf("%s\n", u.c_str());
 		}

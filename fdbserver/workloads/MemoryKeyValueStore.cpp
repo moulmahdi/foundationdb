@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -126,12 +126,12 @@ uint64_t MemoryKeyValueStore::size() const {
 
 // The first key in the database; returned by key selectors that choose a key off the front
 Key MemoryKeyValueStore::startKey() const {
-	return LiteralStringRef("");
+	return ""_sr;
 }
 
 // The last key in the database; returned by key selectors that choose a key off the back
 Key MemoryKeyValueStore::endKey() const {
-	return LiteralStringRef("\xff");
+	return "\xff"_sr;
 }
 
 // Debugging function that prints all key-value pairs

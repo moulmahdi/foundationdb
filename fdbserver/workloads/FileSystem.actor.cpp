@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,22 +18,23 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct FileSystemWorkload : TestWorkload {
+	static constexpr auto NAME = "FileSystem";
 	int actorCount, writeActorCount, fileCount, pathMinChars, pathCharRange, serverCount, userIDCount;
 	double testDuration, transactionsPerSecond, deletedFilesRatio;
 	bool discardEdgeMeasurements, performingWrites, loggingQueries;
 	std::string operationName;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter queries, writes;
-	ContinuousSample<double> latencies;
-	ContinuousSample<double> writeLatencies;
+	DDSketch<double> latencies;
+	DDSketch<double> writeLatencies;
 
 	class FileSystemOp {
 	public:
@@ -43,27 +44,23 @@ struct FileSystemWorkload : TestWorkload {
 	};
 
 	FileSystemWorkload(WorkloadContext const& wcx)
-	  : TestWorkload(wcx), queries("Queries"), writes("Latency"), latencies(2500), writeLatencies(1000) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		transactionsPerSecond = getOption(options, LiteralStringRef("transactionsPerSecond"), 5000.0) / clientCount;
-		double allowedLatency = getOption(options, LiteralStringRef("allowedLatency"), 0.250);
+	  : TestWorkload(wcx), queries("Queries"), writes("Latency"), latencies(), writeLatencies() {
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		transactionsPerSecond = getOption(options, "transactionsPerSecond"_sr, 5000.0) / clientCount;
+		double allowedLatency = getOption(options, "allowedLatency"_sr, 0.250);
 		actorCount = transactionsPerSecond * allowedLatency;
-		fileCount = getOption(options, LiteralStringRef("fileCount"), 100000);
-		pathMinChars = std::max(getOption(options, LiteralStringRef("pathMinChars"), 32), 8);
-		pathCharRange =
-		    std::max(getOption(options, LiteralStringRef("pathMaxChars"), 128), pathMinChars) - pathMinChars;
-		discardEdgeMeasurements = getOption(options, LiteralStringRef("discardEdgeMeasurements"), true);
-		deletedFilesRatio = getOption(options, LiteralStringRef("deletedFilesRatio"), 0.01);
-		serverCount = getOption(options, LiteralStringRef("serverCount"), 32);
-		userIDCount = getOption(options, LiteralStringRef("userIDCount"), std::max(100, fileCount / 3000));
-		operationName =
-		    getOption(options, LiteralStringRef("operationName"), LiteralStringRef("modificationQuery")).toString();
-		performingWrites = getOption(options, LiteralStringRef("performingWrites"), false);
-		writeActorCount = getOption(options, LiteralStringRef("writeActorCount"), 4);
-		loggingQueries = getOption(options, LiteralStringRef("loggingQueries"), false);
+		fileCount = getOption(options, "fileCount"_sr, 100000);
+		pathMinChars = std::max(getOption(options, "pathMinChars"_sr, 32), 8);
+		pathCharRange = std::max(getOption(options, "pathMaxChars"_sr, 128), pathMinChars) - pathMinChars;
+		discardEdgeMeasurements = getOption(options, "discardEdgeMeasurements"_sr, true);
+		deletedFilesRatio = getOption(options, "deletedFilesRatio"_sr, 0.01);
+		serverCount = getOption(options, "serverCount"_sr, 32);
+		userIDCount = getOption(options, "userIDCount"_sr, std::max(100, fileCount / 3000));
+		operationName = getOption(options, "operationName"_sr, "modificationQuery"_sr).toString();
+		performingWrites = getOption(options, "performingWrites"_sr, false);
+		writeActorCount = getOption(options, "writeActorCount"_sr, 4);
+		loggingQueries = getOption(options, "loggingQueries"_sr, false);
 	}
-
-	std::string description() const override { return "ReadWrite"; }
 
 	Future<Void> setup(Database const& cx) override { return nodeSetup(cx, this); }
 
@@ -74,16 +71,16 @@ struct FileSystemWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		double duration = testDuration * (discardEdgeMeasurements ? 0.75 : 1.0);
-		m.push_back(PerfMetric("Measured Duration", duration, true));
-		m.push_back(PerfMetric("Transactions/sec", queries.getValue() / duration, false));
-		m.push_back(PerfMetric("Writes/sec", writes.getValue() / duration, false));
-		m.push_back(PerfMetric("Mean Latency (ms)", 1000 * latencies.mean(), true));
-		m.push_back(PerfMetric("Median Latency (ms, averaged)", 1000 * latencies.median(), true));
-		m.push_back(PerfMetric("90% Latency (ms, averaged)", 1000 * latencies.percentile(0.90), true));
-		m.push_back(PerfMetric("98% Latency (ms, averaged)", 1000 * latencies.percentile(0.98), true));
-		m.push_back(PerfMetric("Median Write Latency (ms, averaged)", 1000 * writeLatencies.median(), true));
+		m.emplace_back("Measured Duration", duration, Averaged::True);
+		m.emplace_back("Transactions/sec", queries.getValue() / duration, Averaged::False);
+		m.emplace_back("Writes/sec", writes.getValue() / duration, Averaged::False);
+		m.emplace_back("Mean Latency (ms)", 1000 * latencies.mean(), Averaged::True);
+		m.emplace_back("Median Latency (ms, averaged)", 1000 * latencies.median(), Averaged::True);
+		m.emplace_back("90% Latency (ms, averaged)", 1000 * latencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% Latency (ms, averaged)", 1000 * latencies.percentile(0.98), Averaged::True);
+		m.emplace_back("Median Write Latency (ms, averaged)", 1000 * writeLatencies.median(), Averaged::True);
 	}
 
 	Key keyForFileID(uint64_t id) { return StringRef(format("/files/id/%016llx", id)); }
@@ -105,7 +102,7 @@ struct FileSystemWorkload : TestWorkload {
 		std::string keyStr(key.toString());
 		tr->set(keyStr + "/size", format("%d", deterministicRandom()->randomInt(0, std::numeric_limits<int>::max())));
 		tr->set(keyStr + "/server", format("%d", deterministicRandom()->randomInt(0, self->serverCount)));
-		tr->set(keyStr + "/deleted", deleted ? LiteralStringRef("1") : LiteralStringRef("0"));
+		tr->set(keyStr + "/deleted", deleted ? "1"_sr : "0"_sr);
 		tr->set(keyStr + "/server", format("%d", serverID));
 		tr->set(keyStr + "/created", doubleToTestKey(time));
 		tr->set(keyStr + "/lastupdated", doubleToTestKey(time));
@@ -140,7 +137,7 @@ struct FileSystemWorkload : TestWorkload {
 
 	ACTOR Future<Void> nodeSetup(Database cx, FileSystemWorkload* self) {
 		state int i;
-		state vector<int> order;
+		state std::vector<int> order;
 		state int nodesToSetUp = self->fileCount / self->clientCount + 1;
 		state int startingNode = nodesToSetUp * self->clientId;
 		state int batchCount = 5;
@@ -148,7 +145,7 @@ struct FileSystemWorkload : TestWorkload {
 			order.push_back(o * batchCount);
 		deterministicRandom()->randomShuffle(order);
 		for (i = 0; i < order.size();) {
-			vector<Future<Void>> fs;
+			std::vector<Future<Void>> fs;
 			for (int j = 0; j < 100 && i < order.size(); j++) {
 				fs.push_back(self->setupRange(
 				    cx,
@@ -250,10 +247,10 @@ struct FileSystemWorkload : TestWorkload {
 						ASSERT(serverStr.present());
 						int serverID = testKeyToInt(serverStr.get());
 						if (deleted.get().toString() == "1") {
-							tr.set(keyStr + "/deleted", LiteralStringRef("0"));
+							tr.set(keyStr + "/deleted", "0"_sr);
 							tr.clear(format("/files/server/%08x/deleted/%016llx", serverID, fileID));
 						} else {
-							tr.set(keyStr + "/deleted", LiteralStringRef("1"));
+							tr.set(keyStr + "/deleted", "1"_sr);
 							tr.set(format("/files/server/%08x/deleted/%016llx", serverID, fileID),
 							       doubleToTestKey(time));
 						}
@@ -336,4 +333,4 @@ struct FileSystemWorkload : TestWorkload {
 	};
 };
 
-WorkloadFactory<FileSystemWorkload> FileSystemWorkloadFactory("FileSystem");
+WorkloadFactory<FileSystemWorkload> FileSystemWorkloadFactory;

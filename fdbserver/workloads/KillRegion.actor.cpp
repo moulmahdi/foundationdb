@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,17 +29,19 @@
 #include "flow/actorcompiler.h" // This must be the last include.
 
 struct KillRegionWorkload : TestWorkload {
+	static constexpr auto NAME = "KillRegion";
 	bool enabled;
 	double testDuration;
 
 	KillRegionWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 		enabled =
 		    !clientId && g_network->isSimulated(); // only do this on the "first" client, and only when in simulation
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		g_simulator.usableRegions = 1;
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		g_simulator->usableRegions = 1;
 	}
 
-	std::string description() const override { return "KillRegionWorkload"; }
+	void disableFailureInjectionWorkloads(std::set<std::string>& out) const override { out.insert("all"); }
+
 	Future<Void> setup(Database const& cx) override {
 		if (enabled) {
 			return _setup(this, cx);
@@ -53,13 +55,13 @@ struct KillRegionWorkload : TestWorkload {
 		return Void();
 	}
 	Future<bool> check(Database const& cx) override { return true; }
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<Void> _setup(KillRegionWorkload* self, Database cx) {
 		TraceEvent("ForceRecovery_DisablePrimaryBegin").log();
-		wait(success(changeConfig(cx, g_simulator.disablePrimary, true)));
+		wait(success(ManagementAPI::changeConfig(cx.getReference(), g_simulator->disablePrimary, true)));
 		TraceEvent("ForceRecovery_WaitForRemote").log();
-		wait(waitForPrimaryDC(cx, LiteralStringRef("1")));
+		wait(waitForPrimaryDC(cx, "1"_sr));
 		TraceEvent("ForceRecovery_DisablePrimaryComplete").log();
 		return Void();
 	}
@@ -75,50 +77,56 @@ struct KillRegionWorkload : TestWorkload {
 		ASSERT(g_network->isSimulated());
 		if (deterministicRandom()->random01() < 0.5) {
 			TraceEvent("ForceRecovery_DisableRemoteBegin").log();
-			wait(success(changeConfig(cx, g_simulator.disableRemote, true)));
+			wait(success(ManagementAPI::changeConfig(cx.getReference(), g_simulator->disableRemote, true)));
 			TraceEvent("ForceRecovery_WaitForPrimary").log();
-			wait(waitForPrimaryDC(cx, LiteralStringRef("0")));
+			wait(waitForPrimaryDC(cx, "0"_sr));
 			TraceEvent("ForceRecovery_DisableRemoteComplete").log();
-			wait(success(changeConfig(cx, g_simulator.originalRegions, true)));
+			wait(success(ManagementAPI::changeConfig(cx.getReference(), g_simulator->originalRegions, true)));
 		}
 		TraceEvent("ForceRecovery_Wait").log();
 		wait(delay(deterministicRandom()->random01() * self->testDuration));
 
 		// FIXME: killDataCenter breaks simulation if forceKill=false, since some processes can survive and
 		// partially complete a recovery
-		g_simulator.killDataCenter(LiteralStringRef("0"),
-		                           deterministicRandom()->random01() < 0.5 ? ISimulator::KillInstantly
-		                                                                   : ISimulator::RebootAndDelete,
-		                           true);
-		g_simulator.killDataCenter(LiteralStringRef("2"),
-		                           deterministicRandom()->random01() < 0.5 ? ISimulator::KillInstantly
-		                                                                   : ISimulator::RebootAndDelete,
-		                           true);
-		g_simulator.killDataCenter(LiteralStringRef("4"),
-		                           deterministicRandom()->random01() < 0.5 ? ISimulator::KillInstantly
-		                                                                   : ISimulator::RebootAndDelete,
-		                           true);
+		g_simulator->killDataCenter("0"_sr,
+		                            deterministicRandom()->random01() < 0.5 ? ISimulator::KillInstantly
+		                                                                    : ISimulator::RebootAndDelete,
+		                            true);
+		g_simulator->killDataCenter("2"_sr,
+		                            deterministicRandom()->random01() < 0.5 ? ISimulator::KillInstantly
+		                                                                    : ISimulator::RebootAndDelete,
+		                            true);
+		g_simulator->killDataCenter("4"_sr,
+		                            deterministicRandom()->random01() < 0.5 ? ISimulator::KillInstantly
+		                                                                    : ISimulator::RebootAndDelete,
+		                            true);
 
 		TraceEvent("ForceRecovery_Begin").log();
 
-		wait(forceRecovery(cx->getConnectionFile(), LiteralStringRef("1")));
+		wait(forceRecovery(cx->getConnectionRecord(), "1"_sr));
 
 		TraceEvent("ForceRecovery_UsableRegions").log();
 
 		DatabaseConfiguration conf = wait(getDatabaseConfiguration(cx));
 
-		TraceEvent("ForceRecovery_GotConfig").detail("Conf", conf.toString());
+		TraceEvent("ForceRecovery_GotConfig")
+		    .setMaxEventLength(11000)
+		    .setMaxFieldLength(10000)
+		    .detail("Conf", conf.toString());
 
 		if (conf.usableRegions > 1) {
 			loop {
 				// only needed if force recovery was unnecessary and we killed the secondary
-				wait(success(changeConfig(cx, g_simulator.disablePrimary + " repopulate_anti_quorum=1", true)));
+				wait(success(ManagementAPI::changeConfig(
+				    cx.getReference(), g_simulator->disablePrimary + " repopulate_anti_quorum=1", true)));
 				choose {
-					when(wait(waitForStorageRecovered(self))) { break; }
+					when(wait(waitForStorageRecovered(self))) {
+						break;
+					}
 					when(wait(delay(300.0))) {}
 				}
 			}
-			wait(success(changeConfig(cx, "usable_regions=1", true)));
+			wait(success(ManagementAPI::changeConfig(cx.getReference(), "usable_regions=1", true)));
 		}
 
 		TraceEvent("ForceRecovery_Complete").log();
@@ -127,4 +135,4 @@ struct KillRegionWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<KillRegionWorkload> KillRegionWorkloadFactory("KillRegion");
+WorkloadFactory<KillRegionWorkload> KillRegionWorkloadFactory;

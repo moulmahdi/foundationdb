@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,17 @@
  * limitations under the License.
  */
 
+// TODO this should really be renamed "TSSComparison.cpp"
 #include "fdbclient/StorageServerInterface.h"
-#include "flow/crc32c.h" // for crc32c_append, to checksum values in tss trace events
+#include "fdbclient/BlobWorkerInterface.h"
+#include "crc32/crc32c.h" // for crc32c_append, to checksum values in tss trace events
 
 // Includes template specializations for all tss operations on storage server types.
 // New StorageServerInterface reply types must be added here or it won't compile.
 
 // if size + hex of checksum is shorter than value, record that instead of actual value. break-even point is 12
 // characters
-std::string traceChecksumValue(ValueRef s) {
+std::string traceChecksumValue(const ValueRef& s) {
 	return s.size() > 12 ? format("(%d)%08x", s.size(), crc32c_append(0, s.begin(), s.size())) : s.toString();
 }
 
@@ -47,6 +49,7 @@ void TSS_traceMismatch(TraceEvent& event,
                        const GetValueReply& src,
                        const GetValueReply& tss) {
 	event.detail("Key", req.key.printable())
+	    .detail("Tenant", req.tenantInfo.name)
 	    .detail("Version", req.version)
 	    .detail("SSReply", src.value.present() ? traceChecksumValue(src.value.get()) : "missing")
 	    .detail("TSSReply", tss.value.present() ? traceChecksumValue(tss.value.get()) : "missing");
@@ -104,6 +107,7 @@ void TSS_traceMismatch(TraceEvent& event, const GetKeyRequest& req, const GetKey
 	event
 	    .detail("KeySelector",
 	            format("%s%s:%d", req.sel.orEqual ? "=" : "", req.sel.getKey().printable().c_str(), req.sel.offset))
+	    .detail("Tenant", req.tenantInfo.name)
 	    .detail("Version", req.version)
 	    .detail("SSReply",
 	            format("%s%s:%d", src.sel.orEqual ? "=" : "", src.sel.getKey().printable().c_str(), src.sel.offset))
@@ -122,32 +126,107 @@ const char* TSS_mismatchTraceName(const GetKeyValuesRequest& req) {
 	return "TSSMismatchGetKeyValues";
 }
 
+static void traceKeyValuesSummary(TraceEvent& event,
+                                  const KeySelectorRef& begin,
+                                  const KeySelectorRef& end,
+                                  Optional<TenantNameRef> tenant,
+                                  Version version,
+                                  int limit,
+                                  int limitBytes,
+                                  size_t ssSize,
+                                  bool ssMore,
+                                  size_t tssSize,
+                                  bool tssMore) {
+	std::string ssSummaryString = format("(%d)%s", ssSize, ssMore ? "+" : "");
+	std::string tssSummaryString = format("(%d)%s", tssSize, tssMore ? "+" : "");
+	event.detail("Begin", format("%s%s:%d", begin.orEqual ? "=" : "", begin.getKey().printable().c_str(), begin.offset))
+	    .detail("End", format("%s%s:%d", end.orEqual ? "=" : "", end.getKey().printable().c_str(), end.offset))
+	    .detail("Tenant", tenant)
+	    .detail("Version", version)
+	    .detail("Limit", limit)
+	    .detail("LimitBytes", limitBytes)
+	    .detail("SSReplySummary", ssSummaryString)
+	    .detail("TSSReplySummary", tssSummaryString);
+}
+
+static void traceKeyValuesDiff(TraceEvent& event,
+                               const KeySelectorRef& begin,
+                               const KeySelectorRef& end,
+                               Optional<TenantNameRef> tenant,
+                               Version version,
+                               int limit,
+                               int limitBytes,
+                               const VectorRef<KeyValueRef>& ssKV,
+                               bool ssMore,
+                               const VectorRef<KeyValueRef>& tssKV,
+                               bool tssMore) {
+	traceKeyValuesSummary(
+	    event, begin, end, tenant, version, limit, limitBytes, ssKV.size(), ssMore, tssKV.size(), tssMore);
+	bool mismatchFound = false;
+	for (int i = 0; i < std::max(ssKV.size(), tssKV.size()); i++) {
+		if (i >= ssKV.size() || i >= tssKV.size() || ssKV[i] != tssKV[i]) {
+			event.detail("MismatchIndex", i);
+			if (i >= ssKV.size() || i >= tssKV.size() || ssKV[i].key != tssKV[i].key) {
+				event.detail("MismatchSSKey", i < ssKV.size() ? ssKV[i].key.printable() : "missing");
+				event.detail("MismatchTSSKey", i < tssKV.size() ? tssKV[i].key.printable() : "missing");
+			} else {
+				event.detail("MismatchKey", ssKV[i].key.printable());
+				event.detail("MismatchSSValue", traceChecksumValue(ssKV[i].value));
+				event.detail("MismatchTSSValue", traceChecksumValue(tssKV[i].value));
+			}
+			mismatchFound = true;
+			break;
+		}
+	}
+	ASSERT(mismatchFound);
+}
+
 template <>
 void TSS_traceMismatch(TraceEvent& event,
                        const GetKeyValuesRequest& req,
                        const GetKeyValuesReply& src,
                        const GetKeyValuesReply& tss) {
-	std::string ssResultsString = format("(%d)%s:\n", src.data.size(), src.more ? "+" : "");
-	for (auto& it : src.data) {
-		ssResultsString += "\n" + it.key.printable() + "=" + traceChecksumValue(it.value);
-	}
+	traceKeyValuesDiff(event,
+	                   req.begin,
+	                   req.end,
+	                   req.tenantInfo.name,
+	                   req.version,
+	                   req.limit,
+	                   req.limitBytes,
+	                   src.data,
+	                   src.more,
+	                   tss.data,
+	                   tss.more);
+}
 
-	std::string tssResultsString = format("(%d)%s:\n", tss.data.size(), tss.more ? "+" : "");
-	for (auto& it : tss.data) {
-		tssResultsString += "\n" + it.key.printable() + "=" + traceChecksumValue(it.value);
-	}
-	event
-	    .detail(
-	        "Begin",
-	        format("%s%s:%d", req.begin.orEqual ? "=" : "", req.begin.getKey().printable().c_str(), req.begin.offset))
-	    .detail("End",
-	            format("%s%s:%d", req.end.orEqual ? "=" : "", req.end.getKey().printable().c_str(), req.end.offset))
-	    .detail("Version", req.version)
-	    .detail("Limit", req.limit)
-	    .detail("LimitBytes", req.limitBytes)
-	    .setMaxFieldLength(FLOW_KNOBS->TSS_LARGE_TRACE_SIZE * 4 / 10)
-	    .detail("SSReply", ssResultsString)
-	    .detail("TSSReply", tssResultsString);
+// range reads and flat map
+template <>
+bool TSS_doCompare(const GetMappedKeyValuesReply& src, const GetMappedKeyValuesReply& tss) {
+	return src.more == tss.more && src.data == tss.data;
+}
+
+template <>
+const char* TSS_mismatchTraceName(const GetMappedKeyValuesRequest& req) {
+	return "TSSMismatchGetMappedKeyValues";
+}
+
+template <>
+void TSS_traceMismatch(TraceEvent& event,
+                       const GetMappedKeyValuesRequest& req,
+                       const GetMappedKeyValuesReply& src,
+                       const GetMappedKeyValuesReply& tss) {
+	traceKeyValuesSummary(event,
+	                      req.begin,
+	                      req.end,
+	                      req.tenantInfo.name,
+	                      req.version,
+	                      req.limit,
+	                      req.limitBytes,
+	                      src.data.size(),
+	                      src.more,
+	                      tss.data.size(),
+	                      tss.more);
+	// FIXME: trace details for TSS mismatch of mapped data
 }
 
 // streaming range reads
@@ -167,27 +246,17 @@ void TSS_traceMismatch(TraceEvent& event,
                        const GetKeyValuesStreamRequest& req,
                        const GetKeyValuesStreamReply& src,
                        const GetKeyValuesStreamReply& tss) {
-	std::string ssResultsString = format("(%d)%s:\n", src.data.size(), src.more ? "+" : "");
-	for (auto& it : src.data) {
-		ssResultsString += "\n" + it.key.printable() + "=" + traceChecksumValue(it.value);
-	}
-
-	std::string tssResultsString = format("(%d)%s:\n", tss.data.size(), tss.more ? "+" : "");
-	for (auto& it : tss.data) {
-		tssResultsString += "\n" + it.key.printable() + "=" + traceChecksumValue(it.value);
-	}
-	event
-	    .detail(
-	        "Begin",
-	        format("%s%s:%d", req.begin.orEqual ? "=" : "", req.begin.getKey().printable().c_str(), req.begin.offset))
-	    .detail("End",
-	            format("%s%s:%d", req.end.orEqual ? "=" : "", req.end.getKey().printable().c_str(), req.end.offset))
-	    .detail("Version", req.version)
-	    .detail("Limit", req.limit)
-	    .detail("LimitBytes", req.limitBytes)
-	    .setMaxFieldLength(FLOW_KNOBS->TSS_LARGE_TRACE_SIZE * 4 / 10)
-	    .detail("SSReply", ssResultsString)
-	    .detail("TSSReply", tssResultsString);
+	traceKeyValuesDiff(event,
+	                   req.begin,
+	                   req.end,
+	                   req.tenantInfo.name,
+	                   req.version,
+	                   req.limit,
+	                   req.limitBytes,
+	                   src.data,
+	                   src.more,
+	                   tss.data,
+	                   tss.more);
 }
 
 template <>
@@ -270,6 +339,27 @@ void TSS_traceMismatch(TraceEvent& event,
 	ASSERT(false);
 }
 
+// change feed
+template <>
+bool TSS_doCompare(const OverlappingChangeFeedsReply& src, const OverlappingChangeFeedsReply& tss) {
+	// We duplicate for load, no need to validate replies
+	return true;
+}
+
+template <>
+const char* TSS_mismatchTraceName(const OverlappingChangeFeedsRequest& req) {
+	ASSERT(false);
+	return "";
+}
+
+template <>
+void TSS_traceMismatch(TraceEvent& event,
+                       const OverlappingChangeFeedsRequest& req,
+                       const OverlappingChangeFeedsReply& src,
+                       const OverlappingChangeFeedsReply& tss) {
+	ASSERT(false);
+}
+
 // template specializations for metrics replies that should never be called because these requests aren't duplicated
 
 // storage metrics
@@ -290,6 +380,26 @@ void TSS_traceMismatch(TraceEvent& event,
                        const WaitMetricsRequest& req,
                        const StorageMetrics& src,
                        const StorageMetrics& tss) {
+	ASSERT(false);
+}
+
+template <>
+bool TSS_doCompare(const BlobGranuleFileReply& src, const BlobGranuleFileReply& tss) {
+	ASSERT(false);
+	return true;
+}
+
+template <>
+const char* TSS_mismatchTraceName(const BlobGranuleFileRequest& req) {
+	ASSERT(false);
+	return "";
+}
+
+template <>
+void TSS_traceMismatch(TraceEvent& event,
+                       const BlobGranuleFileRequest& req,
+                       const BlobGranuleFileReply& src,
+                       const BlobGranuleFileReply& tss) {
 	ASSERT(false);
 }
 
@@ -314,6 +424,12 @@ void TSSMetrics::recordLatency(const GetKeyValuesRequest& req, double ssLatency,
 }
 
 template <>
+void TSSMetrics::recordLatency(const GetMappedKeyValuesRequest& req, double ssLatency, double tssLatency) {
+	SSgetMappedKeyValuesLatency.addSample(ssLatency);
+	TSSgetMappedKeyValuesLatency.addSample(tssLatency);
+}
+
+template <>
 void TSSMetrics::recordLatency(const WatchValueRequest& req, double ssLatency, double tssLatency) {}
 
 template <>
@@ -330,6 +446,13 @@ void TSSMetrics::recordLatency(const SplitRangeRequest& req, double ssLatency, d
 
 template <>
 void TSSMetrics::recordLatency(const GetKeyValuesStreamRequest& req, double ssLatency, double tssLatency) {}
+
+template <>
+void TSSMetrics::recordLatency(const OverlappingChangeFeedsRequest& req, double ssLatency, double tssLatency) {}
+
+// this isn't even to storage servers
+template <>
+void TSSMetrics::recordLatency(const BlobGranuleFileRequest& req, double ssLatency, double tssLatency) {}
 
 // -------------------
 

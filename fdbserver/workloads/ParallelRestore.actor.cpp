@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
  */
 
 #include "fdbrpc/simulator.h"
-#include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/BackupContainer.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
@@ -28,12 +27,12 @@
 
 // A workload which test the correctness of backup and restore process
 struct RunRestoreWorkerWorkload : TestWorkload {
+	static constexpr auto NAME = "RunRestoreWorkerWorkload";
+
 	Future<Void> worker;
 	RunRestoreWorkerWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 		TraceEvent("RunRestoreWorkerWorkloadMX").log();
 	}
-
-	std::string description() const override { return "RunRestoreWorkerWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -56,7 +55,7 @@ struct RunRestoreWorkerWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<RunRestoreWorkerWorkload> RunRestoreWorkerWorkloadFactory("RunRestoreWorkerWorkload");
+WorkloadFactory<RunRestoreWorkerWorkload> RunRestoreWorkerWorkloadFactory;

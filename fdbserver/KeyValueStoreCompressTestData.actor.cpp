@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,8 +35,8 @@ struct KeyValueStoreCompressTestData final : IKeyValueStore {
 
 	KeyValueStoreCompressTestData(IKeyValueStore* store) : store(store) {}
 
-	Future<Void> getError() override { return store->getError(); }
-	Future<Void> onClosed() override { return store->onClosed(); }
+	Future<Void> getError() const override { return store->getError(); }
+	Future<Void> onClosed() const override { return store->onClosed(); }
 	void dispose() override {
 
 		store->dispose();
@@ -53,32 +53,37 @@ struct KeyValueStoreCompressTestData final : IKeyValueStore {
 	void set(KeyValueRef keyValue, const Arena* arena = nullptr) override {
 		store->set(KeyValueRef(keyValue.key, pack(keyValue.value)), arena);
 	}
-	void clear(KeyRangeRef range, const Arena* arena = nullptr) override { store->clear(range, arena); }
+	void clear(KeyRangeRef range,
+	           const StorageServerMetrics* storageMetrics = nullptr,
+	           const Arena* arena = nullptr) override {
+		store->clear(range, storageMetrics, arena);
+	}
 	Future<Void> commit(bool sequential = false) override { return store->commit(sequential); }
 
-	Future<Optional<Value>> readValue(KeyRef key, Optional<UID> debugID = Optional<UID>()) override {
-		return doReadValue(store, key, debugID);
+	Future<Optional<Value>> readValue(KeyRef key, Optional<ReadOptions> options) override {
+		return doReadValue(store, key, options);
 	}
 
 	// Note that readValuePrefix doesn't do anything in this implementation of IKeyValueStore, so the "atomic bomb"
 	// problem is still present if you are using this storage interface, but this storage interface is not used by
 	// customers ever. However, if you want to try to test malicious atomic op workloads with compressed values for some
 	// reason, you will need to fix this.
-	Future<Optional<Value>> readValuePrefix(KeyRef key,
-	                                        int maxLength,
-	                                        Optional<UID> debugID = Optional<UID>()) override {
-		return doReadValuePrefix(store, key, maxLength, debugID);
+	Future<Optional<Value>> readValuePrefix(KeyRef key, int maxLength, Optional<ReadOptions> options) override {
+		return doReadValuePrefix(store, key, maxLength, options);
 	}
 
 	// If rowLimit>=0, reads first rows sorted ascending, otherwise reads last rows sorted descending
 	// The total size of the returned value (less the last entry) will be less than byteLimit
-	Future<RangeResult> readRange(KeyRangeRef keys, int rowLimit = 1 << 30, int byteLimit = 1 << 30) override {
-		return doReadRange(store, keys, rowLimit, byteLimit);
+	Future<RangeResult> readRange(KeyRangeRef keys,
+	                              int rowLimit,
+	                              int byteLimit,
+	                              Optional<ReadOptions> options = Optional<ReadOptions>()) override {
+		return doReadRange(store, keys, rowLimit, byteLimit, options);
 	}
 
 private:
-	ACTOR static Future<Optional<Value>> doReadValue(IKeyValueStore* store, Key key, Optional<UID> debugID) {
-		Optional<Value> v = wait(store->readValue(key, debugID));
+	ACTOR static Future<Optional<Value>> doReadValue(IKeyValueStore* store, Key key, Optional<ReadOptions> options) {
+		Optional<Value> v = wait(store->readValue(key, options));
 		if (!v.present())
 			return v;
 		return unpack(v.get());
@@ -87,8 +92,8 @@ private:
 	ACTOR static Future<Optional<Value>> doReadValuePrefix(IKeyValueStore* store,
 	                                                       Key key,
 	                                                       int maxLength,
-	                                                       Optional<UID> debugID) {
-		Optional<Value> v = wait(doReadValue(store, key, debugID));
+	                                                       Optional<ReadOptions> options) {
+		Optional<Value> v = wait(doReadValue(store, key, options));
 		if (!v.present())
 			return v;
 		if (maxLength < v.get().size()) {
@@ -97,8 +102,12 @@ private:
 			return v;
 		}
 	}
-	ACTOR Future<RangeResult> doReadRange(IKeyValueStore* store, KeyRangeRef keys, int rowLimit, int byteLimit) {
-		RangeResult _vs = wait(store->readRange(keys, rowLimit, byteLimit));
+	ACTOR Future<RangeResult> doReadRange(IKeyValueStore* store,
+	                                      KeyRangeRef keys,
+	                                      int rowLimit,
+	                                      int byteLimit,
+	                                      Optional<ReadOptions> options) {
+		RangeResult _vs = wait(store->readRange(keys, rowLimit, byteLimit, options));
 		RangeResult vs = _vs; // Get rid of implicit const& from wait statement
 		Arena& a = vs.arena();
 		for (int i = 0; i < vs.size(); i++)
@@ -114,12 +123,12 @@ private:
 
 		// If the value starts with a 0-byte, then we don't compress it
 		if (c == 0)
-			return val.withPrefix(LiteralStringRef("\x00"));
+			return val.withPrefix("\x00"_sr);
 
 		for (int i = 1; i < val.size(); i++) {
 			if (val[i] != c) {
 				// The value is something other than a single repeated character, so not compressible :-)
-				return val.withPrefix(LiteralStringRef("\x00"));
+				return val.withPrefix("\x00"_sr);
 			}
 		}
 

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbclient/ReadYourWrites.h"
@@ -26,17 +25,17 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct RYWDisableWorkload : TestWorkload {
+	static constexpr auto NAME = "RYWDisable";
+
 	int nodes, keyBytes;
 	double testDuration;
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 
 	RYWDisableWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 600.0);
-		nodes = getOption(options, LiteralStringRef("nodes"), 100);
-		keyBytes = std::max(getOption(options, LiteralStringRef("keyBytes"), 16), 16);
+		testDuration = getOption(options, "testDuration"_sr, 600.0);
+		nodes = getOption(options, "nodes"_sr, 100);
+		keyBytes = std::max(getOption(options, "keyBytes"_sr, 16), 16);
 	}
-
-	std::string description() const override { return "RYWDisable"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -108,7 +107,7 @@ struct RYWDisableWorkload : TestWorkload {
 		return ok;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	Key keyForIndex(uint64_t index) {
 		Key result = makeString(keyBytes);
@@ -122,4 +121,4 @@ struct RYWDisableWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<RYWDisableWorkload> RYWDisableWorkloadFactory("RYWDisable");
+WorkloadFactory<RYWDisableWorkload> RYWDisableWorkloadFactory;

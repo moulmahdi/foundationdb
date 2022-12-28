@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,17 +20,20 @@
 
 #include "fdbclient/FDBTypes.h"
 #include "fdbclient/Knobs.h"
+#include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/SystemData.h"
 #include "fdbclient/ReadYourWrites.h"
 #include "fdbrpc/simulator.h"
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/BackupContainer.h"
+#include "fdbserver/Knobs.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/Arena.h"
 #include "flow/serialize.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct IncrementalBackupWorkload : TestWorkload {
+	static constexpr auto NAME = "IncrementalBackup";
 
 	Standalone<StringRef> backupDir;
 	Standalone<StringRef> tag;
@@ -44,18 +47,16 @@ struct IncrementalBackupWorkload : TestWorkload {
 	bool clearBackupAgentKeys;
 
 	IncrementalBackupWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		backupDir = getOption(options, LiteralStringRef("backupDir"), LiteralStringRef("file://simfdb/backups/"));
-		tag = getOption(options, LiteralStringRef("tag"), LiteralStringRef("default"));
-		submitOnly = getOption(options, LiteralStringRef("submitOnly"), false);
-		restoreOnly = getOption(options, LiteralStringRef("restoreOnly"), false);
-		waitForBackup = getOption(options, LiteralStringRef("waitForBackup"), false);
-		waitRetries = getOption(options, LiteralStringRef("waitRetries"), -1);
-		stopBackup = getOption(options, LiteralStringRef("stopBackup"), false);
-		checkBeginVersion = getOption(options, LiteralStringRef("checkBeginVersion"), false);
-		clearBackupAgentKeys = getOption(options, LiteralStringRef("clearBackupAgentKeys"), false);
+		backupDir = getOption(options, "backupDir"_sr, "file://simfdb/backups/"_sr);
+		tag = getOption(options, "tag"_sr, "default"_sr);
+		submitOnly = getOption(options, "submitOnly"_sr, false);
+		restoreOnly = getOption(options, "restoreOnly"_sr, false);
+		waitForBackup = getOption(options, "waitForBackup"_sr, false);
+		waitRetries = getOption(options, "waitRetries"_sr, -1);
+		stopBackup = getOption(options, "stopBackup"_sr, false);
+		checkBeginVersion = getOption(options, "checkBeginVersion"_sr, false);
+		clearBackupAgentKeys = getOption(options, "clearBackupAgentKeys"_sr, false);
 	}
-
-	std::string description() const override { return "IncrementalBackup"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -98,12 +99,12 @@ struct IncrementalBackupWorkload : TestWorkload {
 				if (!backupContainer.isValid()) {
 					TraceEvent("IBackupCheckListContainersAttempt").log();
 					state std::vector<std::string> containers =
-					    wait(IBackupContainer::listContainers(self->backupDir.toString()));
+					    wait(IBackupContainer::listContainers(self->backupDir.toString(), {}));
 					TraceEvent("IBackupCheckListContainersSuccess")
 					    .detail("Size", containers.size())
 					    .detail("First", containers.front());
 					if (containers.size()) {
-						backupContainer = IBackupContainer::openContainer(containers.front());
+						backupContainer = IBackupContainer::openContainer(containers.front(), {}, {});
 					}
 				}
 				state bool e = wait(backupContainer->exists());
@@ -145,17 +146,22 @@ struct IncrementalBackupWorkload : TestWorkload {
 	}
 
 	ACTOR static Future<Void> _start(Database cx, IncrementalBackupWorkload* self) {
+		state Standalone<VectorRef<KeyRangeRef>> backupRanges;
+		addDefaultBackupRanges(backupRanges);
+
 		if (self->submitOnly) {
-			Standalone<VectorRef<KeyRangeRef>> backupRanges;
-			backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
 			TraceEvent("IBackupSubmitAttempt").log();
+			state DatabaseConfiguration configuration = wait(getDatabaseConfiguration(cx));
 			try {
 				wait(self->backupAgent.submitBackup(cx,
 				                                    self->backupDir,
+				                                    {},
 				                                    0,
 				                                    1e8,
 				                                    self->tag.toString(),
 				                                    backupRanges,
+				                                    SERVER_KNOBS->ENABLE_ENCRYPTION &&
+				                                        configuration.tenantMode != TenantMode::OPTIONAL_TENANT,
 				                                    StopWhenDone::False,
 				                                    UsePartitionedLog::False,
 				                                    IncrementalBackupOnly::True));
@@ -219,23 +225,61 @@ struct IncrementalBackupWorkload : TestWorkload {
 			}
 			TraceEvent("IBackupStartListContainersAttempt").log();
 			state std::vector<std::string> containers =
-			    wait(IBackupContainer::listContainers(self->backupDir.toString()));
+			    wait(IBackupContainer::listContainers(self->backupDir.toString(), {}));
 			TraceEvent("IBackupStartListContainersSuccess")
 			    .detail("Size", containers.size())
 			    .detail("First", containers.front());
 			state Key backupURL = Key(containers.front());
+
+			state Standalone<VectorRef<KeyRangeRef>> restoreRange;
+			state Standalone<VectorRef<KeyRangeRef>> systemRestoreRange;
+			for (auto r : backupRanges) {
+				if (!SERVER_KNOBS->ENABLE_ENCRYPTION || !r.intersects(getSystemBackupRanges())) {
+					restoreRange.push_back_deep(restoreRange.arena(), r);
+				} else {
+					KeyRangeRef normalKeyRange = r & normalKeys;
+					KeyRangeRef systemKeyRange = r & systemKeys;
+					if (!normalKeyRange.empty()) {
+						restoreRange.push_back_deep(restoreRange.arena(), normalKeyRange);
+					}
+					if (!systemKeyRange.empty()) {
+						systemRestoreRange.push_back_deep(systemRestoreRange.arena(), systemKeyRange);
+					}
+				}
+			}
+			if (!systemRestoreRange.empty()) {
+				TraceEvent("IBackupSystemRestoreAttempt").detail("BeginVersion", beginVersion);
+				wait(success(self->backupAgent.restore(cx,
+				                                       cx,
+				                                       "system_restore"_sr,
+				                                       backupURL,
+				                                       {},
+				                                       systemRestoreRange,
+				                                       WaitForComplete::True,
+				                                       invalidVersion,
+				                                       Verbose::True,
+				                                       Key(),
+				                                       Key(),
+				                                       LockDB::True,
+				                                       UnlockDB::True,
+				                                       OnlyApplyMutationLogs::True,
+				                                       InconsistentSnapshotOnly::False,
+				                                       beginVersion)));
+			}
 			TraceEvent("IBackupRestoreAttempt").detail("BeginVersion", beginVersion);
 			wait(success(self->backupAgent.restore(cx,
 			                                       cx,
 			                                       Key(self->tag.toString()),
 			                                       backupURL,
+			                                       {},
+			                                       restoreRange,
 			                                       WaitForComplete::True,
 			                                       invalidVersion,
 			                                       Verbose::True,
-			                                       normalKeys,
 			                                       Key(),
 			                                       Key(),
 			                                       LockDB::True,
+			                                       UnlockDB::True,
 			                                       OnlyApplyMutationLogs::True,
 			                                       InconsistentSnapshotOnly::False,
 			                                       beginVersion)));
@@ -244,7 +288,7 @@ struct IncrementalBackupWorkload : TestWorkload {
 		return Void();
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<IncrementalBackupWorkload> IncrementalBackupWorkloadFactory("IncrementalBackup");
+WorkloadFactory<IncrementalBackupWorkload> IncrementalBackupWorkloadFactory;

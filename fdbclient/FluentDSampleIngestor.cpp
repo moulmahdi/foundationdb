@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2021 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -73,17 +73,14 @@ class SampleSender : public std::enable_shared_from_this<SampleSender<Protocol, 
 	}
 
 	void send(boost::asio::ip::tcp::socket& socket, std::shared_ptr<Buf> const& buf) {
-		boost::asio::async_write(
-		    socket,
-		    boost::asio::const_buffer(buf->data, buf->size),
-		    [buf, this](auto const& ec, size_t) {
-				this->sendCompletionHandler(ec);
-			});
+		boost::system::error_code ec;
+		socket.send(boost::asio::const_buffer(buf->data, buf->size), 0, ec);
+		this->sendCompletionHandler(ec);
 	}
 	void send(boost::asio::ip::udp::socket& socket, std::shared_ptr<Buf> const& buf) {
-		socket.async_send(
-		    boost::asio::const_buffer(buf->data, buf->size),
-		    [buf, this](auto const& ec, size_t) { this->sendCompletionHandler(ec); });
+		boost::system::error_code ec;
+		socket.send(boost::asio::const_buffer(buf->data, buf->size), 0, ec);
+		this->sendCompletionHandler(ec);
 	}
 
 	void sendNext() {
@@ -122,18 +119,16 @@ class SampleSender : public std::enable_shared_from_this<SampleSender<Protocol, 
 
 public:
 	SampleSender(Socket& socket, Callback const& callback, std::shared_ptr<Sample> const& sample)
-	  : socket(socket),
-		callback(callback),
-		iter(sample->data.begin()),
-		end(sample->data.end()),
-		sample_(sample) {
-			sendNext();
-		}
+	  : socket(socket), callback(callback), iter(sample->data.begin()), end(sample->data.end()), sample_(sample) {
+		sendNext();
+	}
 };
 
 // Sample function to make instanciation of SampleSender easier
 template <class Protocol, class Callback>
-std::shared_ptr<SampleSender<Protocol, Callback>> makeSampleSender(typename Protocol::socket& socket, Callback const& callback, std::shared_ptr<Sample> const& sample) {
+std::shared_ptr<SampleSender<Protocol, Callback>> makeSampleSender(typename Protocol::socket& socket,
+                                                                   Callback const& callback,
+                                                                   std::shared_ptr<Sample> const& sample) {
 	return std::make_shared<SampleSender<Protocol, Callback>>(socket, callback, sample);
 }
 
@@ -164,11 +159,11 @@ struct FluentDSocketImpl : FluentDSocket, std::enable_shared_from_this<FluentDSo
 		}
 	}
 
-
 	void sendImpl(std::shared_ptr<Sample> const& sample) {
-		makeSampleSender<Protocol>(socket, [self = this->shared_from_this()](boost::system::error_code const& ec){
-			self->sendCompletionHandler(ec);
-		}, sample);
+		makeSampleSender<Protocol>(
+		    socket,
+		    [self = this->shared_from_this()](boost::system::error_code const& ec) { self->sendCompletionHandler(ec); },
+		    sample);
 	}
 
 	void send(std::shared_ptr<Sample> const& sample) override {

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,27 +26,26 @@
 // SOMEDAY: Make this actually run on multiple clients
 
 struct InventoryTestWorkload : TestWorkload {
+	static constexpr auto NAME = "InventoryTest";
 	std::map<Key, int> minExpectedResults,
 	    maxExpectedResults; // Destroyed last, since it's used in actor cancellation of InventoryTestClient(Actor)
 
 	int actorCount, productsPerWrite, nProducts;
 	double testDuration, transactionsPerSecond, fractionWriteTransactions;
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 
 	PerfIntCounter transactions, retries;
 	PerfDoubleCounter totalLatency;
 
 	InventoryTestWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries"), totalLatency("Latency") {
-		actorCount = getOption(options, LiteralStringRef("actorCount"), 500);
-		nProducts = getOption(options, LiteralStringRef("nProducts"), 100000);
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		transactionsPerSecond = getOption(options, LiteralStringRef("transactionsPerSecond"), 10000);
-		fractionWriteTransactions = getOption(options, LiteralStringRef("fractionWriteTransactions"), 0.01);
-		productsPerWrite = getOption(options, LiteralStringRef("productsPerWrite"), 2);
+		actorCount = getOption(options, "actorCount"_sr, 500);
+		nProducts = getOption(options, "nProducts"_sr, 100000);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		transactionsPerSecond = getOption(options, "transactionsPerSecond"_sr, 10000);
+		fractionWriteTransactions = getOption(options, "fractionWriteTransactions"_sr, 0.01);
+		productsPerWrite = getOption(options, "productsPerWrite"_sr, 2);
 	}
-
-	std::string description() const override { return "InventoryTest"; }
 
 	Future<Void> start(Database const& cx) override {
 		if (clientId)
@@ -75,19 +74,18 @@ struct InventoryTestWorkload : TestWorkload {
 		return inventoryTestCheck(cx->clone(), this);
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
-		m.push_back(PerfMetric("Client Failures", failures(), false));
+	void getMetrics(std::vector<PerfMetric>& m) override {
+		m.emplace_back("Client Failures", failures(), Averaged::False);
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
-		m.push_back(PerfMetric("Avg Latency (ms)", 1000 * totalLatency.getValue() / transactions.getValue(), true));
-		m.push_back(PerfMetric("Read rows/simsec (approx)",
-		                       transactions.getValue() *
-		                           (2 * fractionWriteTransactions + 1 * (1.0 - fractionWriteTransactions)) /
-		                           testDuration,
-		                       true));
-		m.push_back(PerfMetric("Write rows/simsec (approx)",
-		                       transactions.getValue() * 2 * fractionWriteTransactions / testDuration,
-		                       true));
+		m.emplace_back("Avg Latency (ms)", 1000 * totalLatency.getValue() / transactions.getValue(), Averaged::True);
+		m.emplace_back("Read rows/simsec (approx)",
+		               transactions.getValue() *
+		                   (2 * fractionWriteTransactions + 1 * (1.0 - fractionWriteTransactions)) / testDuration,
+		               Averaged::True);
+		m.emplace_back("Write rows/simsec (approx)",
+		               transactions.getValue() * 2 * fractionWriteTransactions / testDuration,
+		               Averaged::True);
 	}
 
 	Key chooseProduct() const {
@@ -176,7 +174,7 @@ struct InventoryTestWorkload : TestWorkload {
 				for (auto p = products.begin(); p != products.end(); ++p)
 					self->maxExpectedResults[*p]++;
 				while (1) {
-					vector<Future<Void>> todo;
+					std::vector<Future<Void>> todo;
 					for (auto p = products.begin(); p != products.end(); ++p)
 						todo.push_back(self->inventoryTestWrite(&tr, *p));
 					try {
@@ -215,4 +213,4 @@ struct InventoryTestWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<InventoryTestWorkload> InventoryTestWorkloadFactory("InventoryTest");
+WorkloadFactory<InventoryTestWorkload> InventoryTestWorkloadFactory;

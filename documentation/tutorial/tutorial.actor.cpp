@@ -4,7 +4,7 @@
 *
 * This source file is part of the FoundationDB open source project
 *
-* Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+* Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 * limitations under the License.
 */
 
+#include "fmt/format.h"
 #include "flow/flow.h"
 #include "flow/Platform.h"
 #include "flow/DeterministicRandom.h"
@@ -32,6 +33,12 @@
 #include "flow/actorcompiler.h"
 
 NetworkAddress serverAddress;
+
+enum TutorialWellKnownEndpoints {
+	WLTOKEN_SIMPLE_KV_SERVER = WLTOKEN_FIRST_AVAILABLE,
+	WLTOKEN_ECHO_SERVER,
+	WLTOKEN_COUNT_IN_TUTORIAL
+};
 
 // this is a simple actor that will report how long
 // it is already running once a second.
@@ -56,7 +63,9 @@ ACTOR Future<Void> simpleTimer() {
 ACTOR Future<Void> someFuture(Future<int> ready) {
 	// loop choose {} works as well here - the braces are optional
 	loop choose {
-		when(wait(delay(0.5))) { std::cout << "Still waiting...\n"; }
+		when(wait(delay(0.5))) {
+			std::cout << "Still waiting...\n";
+		}
 		when(int r = wait(ready)) {
 			std::cout << format("Ready %d\n", r);
 			wait(delay(double(r)));
@@ -77,8 +86,12 @@ ACTOR Future<Void> promiseDemo() {
 
 ACTOR Future<Void> eventLoop(AsyncTrigger* trigger) {
 	loop choose {
-		when(wait(delay(0.5))) { std::cout << "Still waiting...\n"; }
-		when(wait(trigger->onTrigger())) { std::cout << "Triggered!\n"; }
+		when(wait(delay(0.5))) {
+			std::cout << "Still waiting...\n";
+		}
+		when(wait(trigger->onTrigger())) {
+			std::cout << "Triggered!\n";
+		}
 	}
 }
 
@@ -153,7 +166,7 @@ struct StreamReply : ReplyPromiseStreamReply {
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, ReplyPromiseStreamReply::acknowledgeToken, index);
+		serializer(ar, ReplyPromiseStreamReply::acknowledgeToken, ReplyPromiseStreamReply::sequence, index);
 	}
 };
 
@@ -171,14 +184,16 @@ uint64_t tokenCounter = 1;
 
 ACTOR Future<Void> echoServer() {
 	state EchoServerInterface echoServer;
-	echoServer.getInterface.makeWellKnownEndpoint(UID(-1, ++tokenCounter), TaskPriority::DefaultEndpoint);
+	echoServer.getInterface.makeWellKnownEndpoint(WLTOKEN_ECHO_SERVER, TaskPriority::DefaultEndpoint);
 	loop {
 		try {
 			choose {
 				when(GetInterfaceRequest req = waitNext(echoServer.getInterface.getFuture())) {
 					req.reply.send(echoServer);
 				}
-				when(EchoRequest req = waitNext(echoServer.echo.getFuture())) { req.reply.send(req.message); }
+				when(EchoRequest req = waitNext(echoServer.echo.getFuture())) {
+					req.reply.send(req.message);
+				}
 				when(ReverseRequest req = waitNext(echoServer.reverse.getFuture())) {
 					req.reply.send(std::string(req.message.rbegin(), req.message.rend()));
 				}
@@ -204,7 +219,8 @@ ACTOR Future<Void> echoServer() {
 
 ACTOR Future<Void> echoClient() {
 	state EchoServerInterface server;
-	server.getInterface = RequestStream<GetInterfaceRequest>(Endpoint({ serverAddress }, UID(-1, ++tokenCounter)));
+	server.getInterface =
+	    RequestStream<GetInterfaceRequest>(Endpoint::wellKnown({ serverAddress }, WLTOKEN_ECHO_SERVER));
 	EchoServerInterface s = wait(server.getInterface.getReply(GetInterfaceRequest()));
 	server = s;
 	EchoRequest echoRequest;
@@ -230,7 +246,7 @@ ACTOR Future<Void> echoClient() {
 	return Void();
 }
 
-struct SimpleKeyValueStoreInteface {
+struct SimpleKeyValueStoreInterface {
 	constexpr static FileIdentifier file_identifier = 8226647;
 	RequestStream<struct GetKVInterface> connect;
 	RequestStream<struct GetRequest> get;
@@ -245,7 +261,7 @@ struct SimpleKeyValueStoreInteface {
 
 struct GetKVInterface {
 	constexpr static FileIdentifier file_identifier = 8062308;
-	ReplyPromise<SimpleKeyValueStoreInteface> reply;
+	ReplyPromise<SimpleKeyValueStoreInterface> reply;
 
 	template <class Ar>
 	void serialize(Ar& ar) {
@@ -289,9 +305,9 @@ struct ClearRequest {
 };
 
 ACTOR Future<Void> kvStoreServer() {
-	state SimpleKeyValueStoreInteface inf;
+	state SimpleKeyValueStoreInterface inf;
 	state std::map<std::string, std::string> store;
-	inf.connect.makeWellKnownEndpoint(UID(-1, ++tokenCounter), TaskPriority::DefaultEndpoint);
+	inf.connect.makeWellKnownEndpoint(WLTOKEN_SIMPLE_KV_SERVER, TaskPriority::DefaultEndpoint);
 	loop {
 		choose {
 			when(GetKVInterface req = waitNext(inf.connect.getFuture())) {
@@ -325,17 +341,17 @@ ACTOR Future<Void> kvStoreServer() {
 	}
 }
 
-ACTOR Future<SimpleKeyValueStoreInteface> connect() {
+ACTOR Future<SimpleKeyValueStoreInterface> connect() {
 	std::cout << format("%llu: Connect...\n", uint64_t(g_network->now()));
-	SimpleKeyValueStoreInteface c;
-	c.connect = RequestStream<GetKVInterface>(Endpoint({ serverAddress }, UID(-1, ++tokenCounter)));
-	SimpleKeyValueStoreInteface result = wait(c.connect.getReply(GetKVInterface()));
+	SimpleKeyValueStoreInterface c;
+	c.connect = RequestStream<GetKVInterface>(Endpoint::wellKnown({ serverAddress }, WLTOKEN_SIMPLE_KV_SERVER));
+	SimpleKeyValueStoreInterface result = wait(c.connect.getReply(GetKVInterface()));
 	std::cout << format("%llu: done..\n", uint64_t(g_network->now()));
 	return result;
 }
 
 ACTOR Future<Void> kvSimpleClient() {
-	state SimpleKeyValueStoreInteface server = wait(connect());
+	state SimpleKeyValueStoreInterface server = wait(connect());
 	std::cout << format("Set %s -> %s\n", "foo", "bar");
 	SetRequest setRequest;
 	setRequest.key = "foo";
@@ -348,7 +364,7 @@ ACTOR Future<Void> kvSimpleClient() {
 	return Void();
 }
 
-ACTOR Future<Void> kvClient(SimpleKeyValueStoreInteface server, std::shared_ptr<uint64_t> ops) {
+ACTOR Future<Void> kvClient(SimpleKeyValueStoreInterface server, std::shared_ptr<uint64_t> ops) {
 	state Future<Void> timeout = delay(20);
 	state int rangeSize = 2 << 12;
 	loop {
@@ -389,7 +405,7 @@ ACTOR Future<Void> throughputMeasurement(std::shared_ptr<uint64_t> operations) {
 }
 
 ACTOR Future<Void> multipleClients() {
-	SimpleKeyValueStoreInteface server = wait(connect());
+	SimpleKeyValueStoreInterface server = wait(connect());
 	auto ops = std::make_shared<uint64_t>(0);
 	std::vector<Future<Void>> clients(100);
 	for (auto& f : clients) {
@@ -406,7 +422,7 @@ ACTOR Future<Void> logThroughput(int64_t* v, Key* next) {
 	loop {
 		state int64_t last = *v;
 		wait(delay(1));
-		printf("throughput: %ld bytes/s, next: %s\n", *v - last, printable(*next).c_str());
+		fmt::print("throughput: {} bytes/s, next: {}\n", *v - last, printable(*next).c_str());
 	}
 }
 
@@ -470,7 +486,7 @@ ACTOR Future<Void> fdbClient() {
 	state Transaction tx(db);
 	state std::string keyPrefix = "/tut/";
 	state Key startKey;
-	state KeyRef endKey = LiteralStringRef("/tut0");
+	state KeyRef endKey = "/tut0"_sr;
 	state int beginIdx = 0;
 	loop {
 		try {
@@ -486,7 +502,7 @@ ACTOR Future<Void> fdbClient() {
 			RangeResult range = wait(tx.getRange(KeyRangeRef(startKey, endKey), 100));
 			for (int i = 0; i < 10; ++i) {
 				Key k = Key(keyPrefix + std::to_string(beginIdx + deterministicRandom()->randomInt(0, 100)));
-				tx.set(k, LiteralStringRef("foo"));
+				tx.set(k, "foo"_sr);
 			}
 			wait(tx.commit());
 			std::cout << "Committed\n";
@@ -562,7 +578,7 @@ int main(int argc, char* argv[]) {
 	}
 	platformInit();
 	g_network = newNet2(TLSConfig(), false, true);
-	FlowTransport::createInstance(!isServer, 0);
+	FlowTransport::createInstance(!isServer, 0, WLTOKEN_COUNT_IN_TUTORIAL);
 	NetworkAddress publicAddress = NetworkAddress::parse("0.0.0.0:0");
 	if (isServer) {
 		publicAddress = NetworkAddress::parse("0.0.0.0:" + port);

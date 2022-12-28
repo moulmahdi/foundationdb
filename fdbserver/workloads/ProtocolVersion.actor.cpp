@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2019 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,23 +22,23 @@
 #include "flow/actorcompiler.h" // This must be the last include
 
 struct ProtocolVersionWorkload : TestWorkload {
-	ProtocolVersionWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {}
+	static constexpr auto NAME = "ProtocolVersion";
 
-	std::string description() const override { return "ProtocolVersionWorkload"; }
+	ProtocolVersionWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {}
 
 	Future<Void> start(Database const& cx) override { return _start(this, cx); }
 
 	ACTOR Future<Void> _start(ProtocolVersionWorkload* self, Database cx) {
-		state std::vector<ISimulator::ProcessInfo*> allProcesses = g_pSimulator->getAllProcesses();
+		state std::vector<ISimulator::ProcessInfo*> allProcesses = g_simulator->getAllProcesses();
 		state std::vector<ISimulator::ProcessInfo*>::iterator diffVersionProcess =
 		    find_if(allProcesses.begin(), allProcesses.end(), [](const ISimulator::ProcessInfo* p) {
-			    return p->protocolVersion != currentProtocolVersion;
+			    return p->protocolVersion != currentProtocolVersion();
 		    });
 
 		ASSERT(diffVersionProcess != allProcesses.end());
 
-		RequestStream<ProtocolInfoRequest> requestStream{ Endpoint{ { (*diffVersionProcess)->addresses },
-			                                                        WLTOKEN_PROTOCOL_INFO } };
+		RequestStream<ProtocolInfoRequest> requestStream{ Endpoint::wellKnown({ (*diffVersionProcess)->addresses },
+			                                                                  WLTOKEN_PROTOCOL_INFO) };
 		ProtocolInfoReply reply = wait(retryBrokenPromise(requestStream, ProtocolInfoRequest{}));
 
 		ASSERT(reply.version != g_network->protocolVersion());
@@ -47,7 +47,7 @@ struct ProtocolVersionWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<ProtocolVersionWorkload> ProtocolVersionWorkloadFactory("ProtocolVersion");
+WorkloadFactory<ProtocolVersionWorkload> ProtocolVersionWorkloadFactory;

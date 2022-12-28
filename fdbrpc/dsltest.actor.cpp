@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,16 +28,11 @@
 #include "flow/ThreadHelper.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-using std::cout;
-using std::endl;
-
-using std::vector;
-
 void* allocateLargePages(int total);
 
 bool testFuzzActor(Future<int> (*actor)(FutureStream<int> const&, PromiseStream<int> const&, Future<Void> const&),
                    const char* desc,
-                   vector<int> const& expectedOutput) {
+                   std::vector<int> const& expectedOutput) {
 	// Run the test 5 times with different "timing"
 	int i, outCount;
 	bool ok = true;
@@ -130,21 +125,21 @@ void memoryTest2() {
 	for(int threads=1; threads<=MaxThreads; threads++) {
 		double tstart = timer();
 
-		vector<ThreadFuture<Void>> done;
+		std::vector<ThreadFuture<Void>> done;
 		for(int t=0; t<threads; t++) {
 			char** r = random + Reads*t;
 			done.push_back(
 				inThread<Void>( [r,Reads] () -> Void {
 					for(int i=0; i<Reads; i++)
 						if ( *r[i] )
-							cout << "Does not happen" << endl;
+							std::cout << "Does not happen" << std::endl;
 					return Void();
 				}));
 		}
 		waitForAll(done).getBlocking();
 		double duration = timer() - tstart;
 
-		cout << format("%d threads: %f sec, %0.2fM/sec", threads, duration, Reads*threads/1e6/duration) << endl;
+		std::cout << format("%d threads: %f sec, %0.2fM/sec", threads, duration, Reads*threads/1e6/duration) << std::endl;
 	}
 }
 #endif
@@ -163,17 +158,17 @@ void memoryTest() {
 
 	const int N = 128<<20;	// 128 = 1GB
 	const int N2 = 8<<20;
-	cout << "Preparing memory test with " << N / 1e6 * sizeof(void*) << " MB" << endl;
+	std::cout << "Preparing memory test with " << N / 1e6 * sizeof(void*) << " MB" << std::endl;
 	void **x;
 	if (0) {
-		cout << "  NUMA large pages" << endl;
+		std::cout << "  NUMA large pages" << std::endl;
 		x = (void**)numaAllocate(size_t(N)*sizeof(void*));
 	} else if (1) {
-		cout << "  Normal pages" << endl;
+		std::cout << "  Normal pages" << std::endl;
 		x = new void*[ N ];
 		printf("  at %p\n", x);
 	} else {
-		cout << "  Large pages" << endl;
+		std::cout << "  Large pages" << std::endl;
 		x = (void**)allocate(N*sizeof(void*), true);
 	}
 	memset(x, 0, ((int64_t)N) * sizeof(void*));
@@ -181,7 +176,7 @@ void memoryTest() {
 	showNumaStatus();
 
 	if (1) {
-		cout <<"  Random permutation" << endl;
+		std::cout <<"  Random permutation" << std::endl;
 		// Random cyclic permutation
 		for(int i=0; i<N; i++)
 			x[i] = &x[i];
@@ -191,7 +186,7 @@ void memoryTest() {
 			std::swap( x[k], x[n] );
 		}
 	} else {
-		cout <<"  Sequential permutation" << endl;
+		std::cout <<"  Sequential permutation" << std::endl;
 		// Sequential
 		for(int i=0; i<N-1; i++)
 			x[i] = &x[i+1];
@@ -201,7 +196,7 @@ void memoryTest() {
 	for(int i=0; i<N; i++) {
 		p = (void**)*p;
 		if (p == x) {
-			cout << "Cycle " << i << endl;
+			std::cout << "Cycle " << i << std::endl;
 			if (i != N-1) terminate();
 		}
 	}
@@ -217,7 +212,7 @@ void memoryTest() {
 		}
 		for(int T=1; T<=MT; T+=T) {
 			double start = timer();
-			vector< Future<double> > done;
+			std::vector< Future<double> > done;
 			for(int t=0; t<T; t++) {
 				void*** start = starts + t*TraversalsPerThread;
 				done.push_back(
@@ -233,7 +228,7 @@ void memoryTest() {
 							}
 						for(int j=0; j<TraversalsPerThread; j++)
 							if (p[j] == p[(j+1)%TraversalsPerThread])
-								cout << "N";
+								std::cout << "N";
 						return timer();
 					}));
 			}
@@ -262,14 +257,16 @@ ACTOR template <int N, class X>
 ACTOR template <class A, class B>
 [[flow_allow_discard]] Future<Void> switchTest(FutureStream<A> as, Future<B> oneb) {
 	loop choose {
-		when(A a = waitNext(as)) { cout << "A " << a << endl; }
+		when(A a = waitNext(as)) {
+			std::cout << "A " << a << std::endl;
+		}
 		when(B b = wait(oneb)) {
-			cout << "B " << b << endl;
+			std::cout << "B " << b << std::endl;
 			break;
 		}
 	}
 	loop {
-		cout << "Done!" << endl;
+		std::cout << "Done!" << std::endl;
 		return Void();
 	}
 }
@@ -287,8 +284,8 @@ public:
 	}
 #if !defined(__INTEL_COMPILER)
 	void operator delete(void* buf) {
-		cout << "Freeing buffer" << endl;
-		delete[](int*) buf;
+		std::cout << "Freeing buffer" << std::endl;
+		delete[] (int*)buf;
 	}
 #endif
 
@@ -344,12 +341,12 @@ void fastAllocTest() {
 	}
 	std::sort(d.begin(), d.end());
 	if (std::unique(d.begin(), d.end()) != d.end())
-		cout << "Pointer returned twice!?" << endl;
+		std::cout << "Pointer returned twice!?" << std::endl;
 
 	for (int i = 0; i < 2; i++) {
 		void* p = FastAllocator<64>::allocate();
 		void* q = FastAllocator<64>::allocate();
-		cout << (intptr_t)p << " " << (intptr_t)q << endl;
+		std::cout << (intptr_t)p << " " << (intptr_t)q << std::endl;
 		FastAllocator<64>::release(p);
 		FastAllocator<64>::release(q);
 	}
@@ -358,13 +355,13 @@ void fastAllocTest() {
 	for (int i = 0; i < 1000000; i++)
 		(void)FastAllocator<64>::allocate();
 	t = timer() - t;
-	cout << "Allocations: " << (1 / t) << "M/sec" << endl;
+	std::cout << "Allocations: " << (1 / t) << "M/sec" << std::endl;
 
 	t = timer();
 	for (int i = 0; i < 1000000; i++)
 		FastAllocator<64>::release(FastAllocator<64>::allocate());
 	t = timer() - t;
-	cout << "Allocate/Release pairs: " << (1 / t) << "M/sec" << endl;
+	std::cout << "Allocate/Release pairs: " << (1 / t) << "M/sec" << std::endl;
 
 	t = timer();
 	void* pp[100];
@@ -375,13 +372,13 @@ void fastAllocTest() {
 			FastAllocator<64>::release(pp[j]);
 	}
 	t = timer() - t;
-	cout << "Allocate/Release interleaved(100): " << (1 / t) << "M/sec" << endl;
+	std::cout << "Allocate/Release interleaved(100): " << (1 / t) << "M/sec" << std::endl;
 
 	t = timer();
 	for (int i = 0; i < 1000000; i++)
 		delete new TestB;
 	t = timer() - t;
-	cout << "Allocate/Release TestB pairs: " << (1 / t) << "M/sec" << endl;
+	std::cout << "Allocate/Release TestB pairs: " << (1 / t) << "M/sec" << std::endl;
 
 #if FLOW_THREAD_SAFE
 	t = timer();
@@ -399,8 +396,8 @@ void fastAllocTest() {
 		}));
 	waitForAll(results).getBlocking();
 	t = timer() - t;
-	cout << "Threaded Allocate/Release TestB interleaved (100): " << results.size() << " x " << (1 / t) << "M/sec"
-	     << endl;
+	std::cout << "Threaded Allocate/Release TestB interleaved (100): " << results.size() << " x " << (1 / t) << "M/sec"
+	          << std::endl;
 #endif
 
 	volatile int32_t v = 0;
@@ -409,7 +406,7 @@ void fastAllocTest() {
 	for (int i = 0; i < 10000000; i++)
 		interlockedIncrement(&v);
 	t = timer() - t;
-	cout << "interlocked increment: " << 10.0 / t << "M/sec " << v << endl;
+	std::cout << "interlocked increment: " << 10.0 / t << "M/sec " << v << std::endl;
 
 	v = 5;
 	t = timer();
@@ -417,14 +414,14 @@ void fastAllocTest() {
 		interlockedCompareExchange(&v, 5, 5);
 	}
 	t = timer() - t;
-	cout << "1 state machine: " << 10.0 / t << "M/sec " << v << endl;
+	std::cout << "1 state machine: " << 10.0 / t << "M/sec " << v << std::endl;
 
 	v = 0;
 	t = timer();
 	for (int i = 0; i < 10000000; i++)
 		v++;
 	t = timer() - t;
-	cout << "volatile increment: " << 10.0 / t << "M/sec " << v << endl;
+	std::cout << "volatile increment: " << 10.0 / t << "M/sec " << v << std::endl;
 
 	{
 		Reference<TestBuffer> b(TestBuffer::create(1000));
@@ -436,14 +433,14 @@ void fastAllocTest() {
 			b = std::move(r);
 		}
 		t = timer() - t;
-		cout << "move Reference<Buffer>: " << 10.0 / t << "M/sec " << endl;
+		std::cout << "move Reference<Buffer>: " << 10.0 / t << "M/sec " << std::endl;
 
 		t = timer();
 		for (int i = 0; i < 10000000; i++) {
 			Reference<TestBuffer> r = b;
 		}
 		t = timer() - t;
-		cout << "copy (1) Reference<Buffer>: " << 10.0 / t << "M/sec " << endl;
+		std::cout << "copy (1) Reference<Buffer>: " << 10.0 / t << "M/sec " << std::endl;
 
 		Reference<TestBuffer> c = b;
 		t = timer();
@@ -451,27 +448,27 @@ void fastAllocTest() {
 			Reference<TestBuffer> r = b;
 		}
 		t = timer() - t;
-		cout << "copy (2) Reference<Buffer>: " << 10.0 / t << "M/sec " << endl;
+		std::cout << "copy (2) Reference<Buffer>: " << 10.0 / t << "M/sec " << std::endl;
 
-		cout << (const char*)b->begin() << endl;
+		std::cout << (const char*)b->begin() << std::endl;
 	}
 	t = timer();
 	for (int i = 0; i < 10000000; i++) {
 		delete new FastKey;
 	}
 	t = timer() - t;
-	cout << "delete new FastKey: " << 10.0 / t << "M/sec " << fastKeyCount << endl;
+	std::cout << "delete new FastKey: " << 10.0 / t << "M/sec " << fastKeyCount << std::endl;
 
 	t = timer();
 	for (int i = 0; i < 10000000; i++) {
 		Reference<FastKey> r(new FastKey);
 	}
 	t = timer() - t;
-	cout << "new Reference<FastKey>: " << 10.0 / t << "M/sec " << fastKeyCount << endl;
+	std::cout << "new Reference<FastKey>: " << 10.0 / t << "M/sec " << fastKeyCount << std::endl;
 }
 
 template <class PromiseT>
-Future<Void> threadSafetySender(vector<PromiseT>& v, Event& start, Event& ready, int iterations) {
+Future<Void> threadSafetySender(std::vector<PromiseT>& v, Event& start, Event& ready, int iterations) {
 	for (int i = 0; i < iterations; i++) {
 		start.block();
 		if (v.size() == 0)
@@ -500,7 +497,7 @@ void threadSafetyTest() {
 
 	int N = 10000, V = 100;
 
-	vector<Promise<Void>> v;
+	std::vector<Promise<Void>> v;
 	Event start, ready;
 	Future<Void> sender = inThread<Void>( [&] { return threadSafetySender( v, start, ready, N ); } );
 
@@ -508,7 +505,7 @@ void threadSafetyTest() {
 		v.clear();
 		for (int j = 0; j < V; j++)
 			v.push_back(Promise<Void>());
-		vector<Future<Void>> f( v.size() );
+		std::vector<Future<Void>> f( v.size() );
 		for(int i=0; i<v.size(); i++)
 			f[i] = v[i].getFuture();
 		std::random_shuffle( f.begin(), f.end() );
@@ -520,11 +517,11 @@ void threadSafetyTest() {
 		ready.block();
 
 		if (count != V)
-			cout << "Thread safety error: " << count << endl;
+			std::cout << "Thread safety error: " << count << std::endl;
 	}
 
 	t = timer()-t;
-	cout << "Thread safety test (2t): " << (V*N/1e6/t) << "M/sec" << endl;
+	std::cout << "Thread safety test (2t): " << (V*N/1e6/t) << "M/sec" << std::endl;
 }
 
 void threadSafetyTest2() {
@@ -532,16 +529,16 @@ void threadSafetyTest2() {
 
 	int N = 1000, V = 100;
 
-	// vector<PromiseStream<Void>> streams( 100 );
-	vector<PromiseStream<Void>> streams;
+	// std::vector<PromiseStream<Void>> streams( 100 );
+	std::vector<PromiseStream<Void>> streams;
 	for (int i = 0; i < 100; i++)
 		streams.push_back(PromiseStream<Void>());
-	vector<PromiseStream<Void>> v;
+	std::vector<PromiseStream<Void>> v;
 	Event start, ready;
 	Future<Void> sender = inThread<Void>( [&] { return threadSafetySender( v, start, ready, N ); } );
 
 	for(int i=0; i<N; i++) {
-		vector<int> counts( streams.size() );
+		std::vector<int> counts( streams.size() );
 		v.clear();
 		for(int k=0; k<V; k++) {
 			int i = deterministicRandom()->randomInt(0, (int)streams.size());
@@ -556,11 +553,11 @@ void threadSafetyTest2() {
 		ready.block();
 
 		if (count != V)
-			cout << "Thread safety error: " << count << endl;
+			std::cout << "Thread safety error: " << count << std::endl;
 	}
 
 	t = timer()-t;
-	cout << "Thread safety test 2 (2t): " << (V*N/1e6/t) << "M/sec" << endl;
+	std::cout << "Thread safety test 2 (2t): " << (V*N/1e6/t) << "M/sec" << std::endl;
 }
 
 volatile int32_t cancelled = 0, returned = 0;
@@ -579,8 +576,8 @@ ACTOR [[flow_allow_discard]] Future<Void> returnCancelRacer( Future<Void> f ) {
 void returnCancelRaceTest() {
 	int N = 100, M = 100;
 	for(int i=0; i<N; i++) {
-		vector< Promise<Void> > promises;
-		vector< Future<Void> > futures;
+		std::vector< Promise<Void> > promises;
+		std::vector< Future<Void> > futures;
 		for(int i=0; i < M; i++) {
 			promises.push_back( Promise<Void>() );
 			futures.push_back( returnCancelRacer( promises.back().getFuture() ) );
@@ -619,8 +616,12 @@ void returnCancelRaceTest() {
 
 ACTOR [[flow_allow_discard]] Future<int> chooseTest(Future<int> a, Future<int> b) {
 	choose {
-		when(int A = wait(a)) { return A; }
-		when(int B = wait(b)) { return B; }
+		when(int A = wait(a)) {
+			return A;
+		}
+		when(int B = wait(b)) {
+			return B;
+		}
 	}
 }
 
@@ -648,14 +649,14 @@ void arenaTest() {
 	{
 		Arena arena;
 		VectorRef<StringRef> test;
-		test.push_back(arena, StringRef(arena, LiteralStringRef("Hello")));
-		test.push_back(arena, StringRef(arena, LiteralStringRef(", ")));
-		test.push_back(arena, StringRef(arena, LiteralStringRef("World!")));
+		test.push_back(arena, StringRef(arena, "Hello"_sr));
+		test.push_back(arena, StringRef(arena, ", "_sr));
+		test.push_back(arena, StringRef(arena, "World!"_sr));
 
 		for (auto i = test.begin(); i != test.end(); ++i)
 			for (auto j = i->begin(); j != i->end(); ++j)
-				cout << *j;
-		cout << endl;
+				std::cout << *j;
+		std::cout << std::endl;
 
 		wr << test;
 	}
@@ -667,8 +668,8 @@ void arenaTest() {
 
 		for (auto i = test2.begin(); i != test2.end(); ++i)
 			for (auto j = i->begin(); j != i->end(); ++j)
-				cout << *j;
-		cout << endl;
+				std::cout << *j;
+		std::cout << std::endl;
 	}
 
 	double t = timer();
@@ -686,7 +687,7 @@ void arenaTest() {
 ACTOR [[flow_allow_discard]] void testStream(FutureStream<int> xs) {
 	loop {
 		int x = waitNext(xs);
-		cout << x << endl;
+		std::cout << x << std::endl;
 	}
 }
 
@@ -947,10 +948,8 @@ ACTOR [[flow_allow_discard]] Future<Void> cancellable2() {
 	}
 }
 
-using std::string;
-
-ACTOR [[flow_allow_discard]] Future<int> introLoadValueFromDisk(Future<string> filename) {
-	string file = wait(filename);
+ACTOR [[flow_allow_discard]] Future<int> introLoadValueFromDisk(Future<std::string> filename) {
+	std::string file = wait(filename);
 
 	if (file == "/dev/threes")
 		return 3;
@@ -967,8 +966,12 @@ ACTOR [[flow_allow_discard]] Future<int> introAdd(Future<int> a, Future<int> b) 
 
 ACTOR [[flow_allow_discard]] Future<int> introFirst(Future<int> a, Future<int> b) {
 	choose {
-		when(int x = wait(a)) { return x; }
-		when(int x = wait(b)) { return x; }
+		when(int x = wait(a)) {
+			return x;
+		}
+		when(int x = wait(b)) {
+			return x;
+		}
 	}
 }
 
@@ -1075,7 +1078,7 @@ ACTOR [[flow_allow_discard]] void cycle(FutureStream<Void> in, PromiseStream<Voi
 }
 
 ACTOR [[flow_allow_discard]] Future<Void> cycleTime(int nodes, int times) {
-	state vector<PromiseStream<Void>> n(nodes);
+	state std::vector<PromiseStream<Void>> n(nodes);
 	state int total = 0;
 
 	// 1->2, 2->3, ..., n-1->0
@@ -1207,8 +1210,8 @@ void dsltest() {
 	actorTest1(true);
 	actorTest2(true);
 	actorTest3(true);
-	// if (g_network == &g_simulator)
-	// g_simulator.run( actorTest4(true) );
+	// if (g_network == g_simulator)
+	// g_simulator->run( actorTest4(true) );
 	actorTest5();
 	actorTest6();
 	actorTest7();
@@ -1361,14 +1364,14 @@ void dsltest() {
 		Future<int> c = chooseTest(a.getFuture(), b.getFuture());
 		a.send(1);
 		b.send(2);
-		cout << "c=" << c.get() << endl;
+		std::cout << "c=" << c.get() << std::endl;
 	}
 
 	{
 		Promise<double> i;
 		Future<double> d = addN<20>(i.getFuture());
 		i.send(1.1);
-		cout << d.get() << endl;
+		std::cout << d.get() << std::endl;
 	}
 
 	{
@@ -1376,9 +1379,9 @@ void dsltest() {
 		i.sendError(operation_failed());
 		Future<double> d = addN<20>(i.getFuture());
 		if (d.isError() && d.getError().code() == error_code_operation_failed)
-			cout << "Error transmitted OK" << endl;
+			std::cout << "Error transmitted OK" << std::endl;
 		else
-			cout << "Error not transmitted!" << endl;
+			std::cout << "Error not transmitted!" << std::endl;
 	}
 
 	/*{
@@ -1386,10 +1389,10 @@ void dsltest() {
 	    PromiseStream<int> t;
 	    testStream(t.getFuture());
 	    if (Actor::allActors.size() != na+1)
-	        cout << "Actor not created!" << endl;
+	        std::cout << "Actor not created!" << std::endl;
 	    t = PromiseStream<int>();
 	    if (Actor::allActors.size() != na)
-	        cout << "Actor not cleaned up!" << endl;
+	        std::cout << "Actor not cleaned up!" << std::endl;
 	}*/
 
 	PromiseStream<int> as;
@@ -1439,7 +1442,7 @@ void pingtest() {
     Future<Void> pS = pingServer( serverInterface.getFuture(), 5000000 );
     Future<int> count = ping( serverInterface );
     double end = timer();
-    cout << count.get() << " pings completed in " << (end-start) << " sec" << endl;
+    std::cout << count.get() << " pings completed in " << (end-start) << " sec" << std::endl;
 }*/
 
 void copyTest() {
@@ -1495,12 +1498,12 @@ void copyTest() {
 
     loop choose {
         when( int j = waitNext( js.getFuture() ) ) {
-            cout << "J" << j << endl;
+            std::cout << "J" << j << std::endl;
         }
         when( int i = waitNext( is ) ) {
-            cout << "I" << i << endl;
+            std::cout << "I" << i << std::endl;
             js.send( i );
-            cout << "-I" << i << endl;
+            std::cout << "-I" << i << std::endl;
         }
     }
 }

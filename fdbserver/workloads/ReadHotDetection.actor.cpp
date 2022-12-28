@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
@@ -27,24 +27,24 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct ReadHotDetectionWorkload : TestWorkload {
+	static constexpr auto NAME = "ReadHotDetection";
+
 	int actorCount, keyCount;
 
 	double testDuration, transactionsPerSecond;
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	Future<Void> readHotCheck;
 	Key readKey;
 	KeyRange wholeRange;
 	bool passed;
 
 	ReadHotDetectionWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 120.0);
-		transactionsPerSecond = getOption(options, LiteralStringRef("transactionsPerSecond"), 1000.0) / clientCount;
-		actorCount = getOption(options, LiteralStringRef("actorsPerClient"), transactionsPerSecond / 5);
-		keyCount = getOption(options, LiteralStringRef("keyCount"), 100);
+		testDuration = getOption(options, "testDuration"_sr, 120.0);
+		transactionsPerSecond = getOption(options, "transactionsPerSecond"_sr, 1000.0) / clientCount;
+		actorCount = getOption(options, "actorsPerClient"_sr, transactionsPerSecond / 5);
+		keyCount = getOption(options, "keyCount"_sr, 100);
 		readKey = StringRef(format("testkey%08x", deterministicRandom()->randomInt(0, keyCount)));
 	}
-
-	std::string description() const override { return "ReadHotDetection"; }
 
 	Future<Void> setup(Database const& cx) override { return _setup(cx, this); }
 
@@ -89,7 +89,7 @@ struct ReadHotDetectionWorkload : TestWorkload {
 				wait(tr.onError(e));
 			}
 		}
-		self->wholeRange = KeyRangeRef(LiteralStringRef(""), LiteralStringRef("\xff"));
+		self->wholeRange = KeyRangeRef(""_sr, "\xff"_sr);
 		// TraceEvent("RHDLog").detail("Phase", "DoneSetup");
 		return Void();
 	}
@@ -98,11 +98,11 @@ struct ReadHotDetectionWorkload : TestWorkload {
 		loop {
 			state Transaction tr(cx);
 			try {
-				StorageMetrics sm = wait(tr.getStorageMetrics(self->wholeRange, 100));
+				StorageMetrics sm = wait(cx->getStorageMetrics(self->wholeRange, 100));
 				// TraceEvent("RHDCheckPhaseLog")
 				//     .detail("KeyRangeSize", sm.bytes)
-				//     .detail("KeyRangeReadBandwith", sm.bytesReadPerKSecond);
-				Standalone<VectorRef<ReadHotRangeWithMetrics>> keyRanges = wait(tr.getReadHotRanges(self->wholeRange));
+				//     .detail("KeyRangeReadBandwidth", sm.bytesReadPerKSecond);
+				Standalone<VectorRef<ReadHotRangeWithMetrics>> keyRanges = wait(cx->getReadHotRanges(self->wholeRange));
 				// TraceEvent("RHDCheckPhaseLog")
 				//     .detail("KeyRangesSize", keyRanges.size())
 				//     .detail("ReadKey", self->readKey.printable().c_str())
@@ -132,7 +132,7 @@ struct ReadHotDetectionWorkload : TestWorkload {
 		}
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR Future<Void> keyReader(Database cx, ReadHotDetectionWorkload* self, double delay, bool useReadKey) {
 		state double lastTime = now();
@@ -162,4 +162,4 @@ struct ReadHotDetectionWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<ReadHotDetectionWorkload> ReadHotDetectionWorkloadFactory("ReadHotDetection");
+WorkloadFactory<ReadHotDetectionWorkload> ReadHotDetectionWorkloadFactory;

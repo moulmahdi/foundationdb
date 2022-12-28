@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@
 #include "fdbclient/DatabaseContext.h"
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/SimpleConfigTransaction.h"
-#include "fdbserver/Knobs.h"
 #include "flow/Arena.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
@@ -41,9 +40,17 @@ class SimpleConfigTransactionImpl {
 		if (self->dID.present()) {
 			TraceEvent("SimpleConfigTransactionGettingReadVersion", self->dID.get());
 		}
-		ConfigTransactionGetGenerationRequest req;
-		ConfigTransactionGetGenerationReply reply =
-		    wait(self->cti.getGeneration.getReply(ConfigTransactionGetGenerationRequest{}));
+		state ConfigTransactionGetGenerationReply reply;
+		if (self->cti.hostname.present()) {
+			wait(store(reply,
+			           retryGetReplyFromHostname(ConfigTransactionGetGenerationRequest{ 0, Optional<Version>() },
+			                                     self->cti.hostname.get(),
+			                                     WLTOKEN_CONFIGTXN_GETGENERATION)));
+		} else {
+			wait(store(reply,
+			           retryBrokenPromise(self->cti.getGeneration,
+			                              ConfigTransactionGetGenerationRequest{ 0, Optional<Version>() })));
+		}
 		if (self->dID.present()) {
 			TraceEvent("SimpleConfigTransactionGotReadVersion", self->dID.get())
 			    .detail("Version", reply.generation.liveVersion);
@@ -62,8 +69,16 @@ class SimpleConfigTransactionImpl {
 			    .detail("ConfigClass", configKey.configClass)
 			    .detail("KnobName", configKey.knobName);
 		}
-		ConfigTransactionGetReply reply =
-		    wait(self->cti.get.getReply(ConfigTransactionGetRequest{ generation, configKey }));
+		state ConfigTransactionGetReply reply;
+		if (self->cti.hostname.present()) {
+			wait(store(reply,
+			           retryGetReplyFromHostname(ConfigTransactionGetRequest{ 0, generation, configKey },
+			                                     self->cti.hostname.get(),
+			                                     WLTOKEN_CONFIGTXN_GET)));
+		} else {
+			wait(store(reply,
+			           retryBrokenPromise(self->cti.get, ConfigTransactionGetRequest{ 0, generation, configKey })));
+		}
 		if (self->dID.present()) {
 			TraceEvent("SimpleConfigTransactionGotValue", self->dID.get())
 			    .detail("Value", reply.value.get().toString());
@@ -80,8 +95,17 @@ class SimpleConfigTransactionImpl {
 			self->getGenerationFuture = getGeneration(self);
 		}
 		ConfigGeneration generation = wait(self->getGenerationFuture);
-		ConfigTransactionGetConfigClassesReply reply =
-		    wait(self->cti.getClasses.getReply(ConfigTransactionGetConfigClassesRequest{ generation }));
+		state ConfigTransactionGetConfigClassesReply reply;
+		if (self->cti.hostname.present()) {
+			wait(store(reply,
+			           retryGetReplyFromHostname(ConfigTransactionGetConfigClassesRequest{ 0, generation },
+			                                     self->cti.hostname.get(),
+			                                     WLTOKEN_CONFIGTXN_GETCLASSES)));
+		} else {
+			wait(store(
+			    reply,
+			    retryBrokenPromise(self->cti.getClasses, ConfigTransactionGetConfigClassesRequest{ 0, generation })));
+		}
 		RangeResult result;
 		for (const auto& configClass : reply.configClasses) {
 			result.push_back_deep(result.arena(), KeyValueRef(configClass, ""_sr));
@@ -94,8 +118,17 @@ class SimpleConfigTransactionImpl {
 			self->getGenerationFuture = getGeneration(self);
 		}
 		ConfigGeneration generation = wait(self->getGenerationFuture);
-		ConfigTransactionGetKnobsReply reply =
-		    wait(self->cti.getKnobs.getReply(ConfigTransactionGetKnobsRequest{ generation, configClass }));
+		state ConfigTransactionGetKnobsReply reply;
+		if (self->cti.hostname.present()) {
+			wait(store(reply,
+			           retryGetReplyFromHostname(ConfigTransactionGetKnobsRequest{ 0, generation, configClass },
+			                                     self->cti.hostname.get(),
+			                                     WLTOKEN_CONFIGTXN_GETKNOBS)));
+		} else {
+			wait(store(reply,
+			           retryBrokenPromise(self->cti.getKnobs,
+			                              ConfigTransactionGetKnobsRequest{ 0, generation, configClass })));
+		}
 		RangeResult result;
 		for (const auto& knobName : reply.knobNames) {
 			result.push_back_deep(result.arena(), KeyValueRef(knobName, ""_sr));
@@ -107,25 +140,50 @@ class SimpleConfigTransactionImpl {
 		if (!self->getGenerationFuture.isValid()) {
 			self->getGenerationFuture = getGeneration(self);
 		}
+		self->toCommit.coordinatorsHash = 0;
 		wait(store(self->toCommit.generation, self->getGenerationFuture));
 		self->toCommit.annotation.timestamp = now();
-		wait(self->cti.commit.getReply(self->toCommit));
+		if (self->cti.hostname.present()) {
+			wait(retryGetReplyFromHostname(self->toCommit, self->cti.hostname.get(), WLTOKEN_CONFIGTXN_COMMIT));
+		} else {
+			wait(retryBrokenPromise(self->cti.commit, self->toCommit));
+		}
 		self->committed = true;
 		return Void();
 	}
 
+	ACTOR static Future<Void> onError(SimpleConfigTransactionImpl* self, Error e) {
+		// TODO: Improve this:
+		if (e.code() == error_code_transaction_too_old || e.code() == error_code_not_committed) {
+			wait(delay((1 << self->numRetries++) * 0.01 * deterministicRandom()->random01()));
+			self->reset();
+			return Void();
+		}
+		throw e;
+	}
+
 public:
 	SimpleConfigTransactionImpl(Database const& cx) : cx(cx) {
-		auto coordinators = cx->getConnectionFile()->getConnectionString().coordinators();
-		std::sort(coordinators.begin(), coordinators.end());
-		cti = ConfigTransactionInterface(coordinators[0]);
+		const ClusterConnectionString& cs = cx->getConnectionRecord()->getConnectionString();
+		if (cs.coords.size()) {
+			std::vector<NetworkAddress> coordinators = cs.coords;
+			std::sort(coordinators.begin(), coordinators.end());
+			cti = ConfigTransactionInterface(coordinators[0]);
+		} else {
+			cti = ConfigTransactionInterface(cs.hostnames[0]);
+		}
 	}
 
 	SimpleConfigTransactionImpl(ConfigTransactionInterface const& cti) : cti(cti) {}
 
-	void set(KeyRef key, ValueRef value) { toCommit.set(key, value); }
+	void set(KeyRef key, ValueRef value) {
+		toCommit.mutations.push_back_deep(toCommit.arena,
+		                                  IKnobCollection::createSetMutation(toCommit.arena, key, value));
+	}
 
-	void clear(KeyRef key) { toCommit.clear(key); }
+	void clear(KeyRef key) {
+		toCommit.mutations.push_back_deep(toCommit.arena, IKnobCollection::createClearMutation(toCommit.arena, key));
+	}
 
 	Future<Optional<Value>> get(KeyRef key) { return get(this, key); }
 
@@ -144,14 +202,7 @@ public:
 
 	Future<Void> commit() { return commit(this); }
 
-	Future<Void> onError(Error const& e) {
-		// TODO: Improve this:
-		if (e.code() == error_code_transaction_too_old) {
-			reset();
-			return delay((1 << numRetries++) * 0.01 * deterministicRandom()->random01());
-		}
-		throw e;
-	}
+	Future<Void> onError(Error const& e) { return onError(this, e); }
 
 	Future<Version> getReadVersion() {
 		if (!getGenerationFuture.isValid())
@@ -183,9 +234,7 @@ public:
 
 	size_t getApproximateSize() const { return toCommit.expectedSize(); }
 
-	void debugTransaction(UID dID) {
-		this->dID = dID;
-	}
+	void debugTransaction(UID dID) { this->dID = dID; }
 
 	void checkDeferredError(Error const& deferredError) const {
 		if (deferredError.code() != invalid_error_code) {
@@ -247,6 +296,10 @@ Version SimpleConfigTransaction::getCommittedVersion() const {
 	return impl->getCommittedVersion();
 }
 
+int64_t SimpleConfigTransaction::getTotalCost() const {
+	return 0;
+}
+
 int64_t SimpleConfigTransaction::getApproximateSize() const {
 	return impl->getApproximateSize();
 }
@@ -280,7 +333,7 @@ void SimpleConfigTransaction::checkDeferredError() const {
 	impl->checkDeferredError(deferredError);
 }
 
-void SimpleConfigTransaction::setDatabase(Database const& cx) {
+void SimpleConfigTransaction::construct(Database const& cx) {
 	impl = PImpl<SimpleConfigTransactionImpl>::create(cx);
 }
 

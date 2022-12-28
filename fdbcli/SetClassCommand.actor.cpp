@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2021 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include "fmt/format.h"
 
 #include "fdbcli/fdbcli.actor.h"
 
@@ -48,7 +50,7 @@ ACTOR Future<Void> printProcessClass(Reference<IDatabase> db) {
 			ASSERT(processSourceList.size() == processTypeList.size());
 			if (!processTypeList.size())
 				printf("No processes are registered in the database.\n");
-			printf("There are currently %zu processes in the database:\n", processTypeList.size());
+			fmt::print("There are currently {} processes in the database:\n", processTypeList.size());
 			for (int index = 0; index < processTypeList.size(); index++) {
 				std::string address =
 				    processTypeList[index].key.removePrefix(fdb_cli::processClassTypeSpecialKeyRange.begin).toString();
@@ -71,15 +73,29 @@ ACTOR Future<Void> printProcessClass(Reference<IDatabase> db) {
 };
 
 ACTOR Future<bool> setProcessClass(Reference<IDatabase> db, KeyRef network_address, KeyRef class_type) {
-    state Reference<ITransaction> tr = db->createTransaction();
+	state Reference<ITransaction> tr = db->createTransaction();
 	loop {
 		tr->setOption(FDBTransactionOptions::SPECIAL_KEY_SPACE_ENABLE_WRITES);
 		try {
-            tr->set(network_address.withPrefix(fdb_cli::processClassTypeSpecialKeyRange.begin), class_type);
-            wait(safeThreadFutureToFuture(tr->commit()));
-            return true;
-        } catch (Error& e) {
-			wait(safeThreadFutureToFuture(tr->onError(e)));
+			state ThreadFuture<Optional<Value>> result =
+			    tr->get(network_address.withPrefix(fdb_cli::processClassTypeSpecialKeyRange.begin));
+			Optional<Value> val = wait(safeThreadFutureToFuture(result));
+			if (!val.present()) {
+				printf("No matching addresses found\n");
+				return false;
+			}
+			tr->set(network_address.withPrefix(fdb_cli::processClassTypeSpecialKeyRange.begin), class_type);
+			wait(safeThreadFutureToFuture(tr->commit()));
+			return true;
+		} catch (Error& e) {
+			state Error err(e);
+			if (e.code() == error_code_special_keys_api_failure) {
+				std::string errorMsgStr = wait(fdb_cli::getSpecialKeysFailureErrorMessage(tr));
+				// error message already has \n at the end
+				fprintf(stderr, "%s", errorMsgStr.c_str());
+				return false;
+			}
+			wait(safeThreadFutureToFuture(tr->onError(err)));
 		}
 	}
 }
@@ -89,12 +105,10 @@ ACTOR Future<bool> setProcessClass(Reference<IDatabase> db, KeyRef network_addre
 namespace fdb_cli {
 
 const KeyRangeRef processClassSourceSpecialKeyRange =
-    KeyRangeRef(LiteralStringRef("\xff\xff/configuration/process/class_source/"),
-                LiteralStringRef("\xff\xff/configuration/process/class_source0"));
+    KeyRangeRef("\xff\xff/configuration/process/class_source/"_sr, "\xff\xff/configuration/process/class_source0"_sr);
 
 const KeyRangeRef processClassTypeSpecialKeyRange =
-    KeyRangeRef(LiteralStringRef("\xff\xff/configuration/process/class_type/"),
-                LiteralStringRef("\xff\xff/configuration/process/class_type0"));
+    KeyRangeRef("\xff\xff/configuration/process/class_type/"_sr, "\xff\xff/configuration/process/class_type0"_sr);
 
 ACTOR Future<bool> setClassCommandActor(Reference<IDatabase> db, std::vector<StringRef> tokens) {
 	if (tokens.size() != 3 && tokens.size() != 1) {
@@ -103,8 +117,8 @@ ACTOR Future<bool> setClassCommandActor(Reference<IDatabase> db, std::vector<Str
 	} else if (tokens.size() == 1) {
 		wait(printProcessClass(db));
 	} else {
-        bool successful = wait(setProcessClass(db, tokens[1], tokens[2]));
-        return successful;
+		bool successful = wait(setProcessClass(db, tokens[1], tokens[2]));
+		return successful;
 	}
 	return true;
 }

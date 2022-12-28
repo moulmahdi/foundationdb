@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ ACTOR Future<Void> unitPerfTest() {
 	printf("\n");
 
 	state int counter = 0;
-	state vector<Future<Void>> sleepy;
+	state std::vector<Future<Void>> sleepy;
 	sleepy.reserve(100000);
 	for (int i = 0; i < 100000; i++)
 		sleepy.push_back(sleepyActor(.1, &counter));
@@ -49,13 +49,13 @@ ACTOR Future<Void> unitPerfTest() {
 }
 
 struct UnitPerfWorkload : TestWorkload {
+	static constexpr auto NAME = "UnitPerf";
 	bool enabled;
 
 	UnitPerfWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 		enabled = !clientId; // only do this on the "first" client
 	}
 
-	std::string description() const override { return "UnitPerfWorkload"; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override {
 		if (enabled)
@@ -63,7 +63,7 @@ struct UnitPerfWorkload : TestWorkload {
 		return Void();
 	}
 	Future<bool> check(Database const& cx) override { return true; }
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<UnitPerfWorkload> UnitPerfWorkloadFactory("UnitPerf");
+WorkloadFactory<UnitPerfWorkload> UnitPerfWorkloadFactory;

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2021 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ ACTOR Future<bool> snapshotCommandActor(Reference<IDatabase> db, std::vector<Str
 		for (int i = 1; i < tokens.size(); i++) {
 			snap_cmd = snap_cmd.withSuffix(tokens[i]);
 			if (i != tokens.size() - 1) {
-				snap_cmd = snap_cmd.withSuffix(LiteralStringRef(" "));
+				snap_cmd = snap_cmd.withSuffix(" "_sr);
 			}
 		}
 		try {
@@ -60,5 +60,5 @@ ACTOR Future<bool> snapshotCommandActor(Reference<IDatabase> db, std::vector<Str
 }
 
 // hidden commands, no help text for now
-CommandFactory dataDistributionFactory("snapshot");
+CommandFactory snapshotFactory("snapshot");
 } // namespace fdb_cli

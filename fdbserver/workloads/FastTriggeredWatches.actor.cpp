@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbclient/ReadYourWrites.h"
@@ -27,22 +26,27 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct FastTriggeredWatchesWorkload : TestWorkload {
+	static constexpr auto NAME = "FastTriggeredWatches";
 	// Tests the time it takes for a watch to be fired after the value has changed in the storage server
 	int nodes, keyBytes;
 	double testDuration;
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter operations, retries;
 	Value defaultValue;
 
 	FastTriggeredWatchesWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), operations("Operations"), retries("Retries") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 600.0);
-		nodes = getOption(options, LiteralStringRef("nodes"), 100);
+		testDuration = getOption(options, "testDuration"_sr, 600.0);
+		nodes = getOption(options, "nodes"_sr, 100);
 		defaultValue = StringRef(format("%010d", deterministicRandom()->randomInt(0, 1000)));
-		keyBytes = std::max(getOption(options, LiteralStringRef("keyBytes"), 16), 16);
+		keyBytes = std::max(getOption(options, "keyBytes"_sr, 16), 16);
 	}
 
-	std::string description() const override { return "Watches"; }
+	void disableFailureInjectionWorkloads(std::set<std::string>& out) const override {
+		// This test asserts that watches fire within a certain version range. Attrition will make this assertion fail
+		// since it can cause recoveries which will bump the cluster version significantly
+		out.emplace("Attrition");
+	}
 
 	Future<Void> setup(Database const& cx) override {
 		if (clientId == 0)
@@ -120,7 +124,8 @@ struct FastTriggeredWatchesWorkload : TestWorkload {
 						}
 						lastReadVersion = tr.getReadVersion().get();
 						//TraceEvent("FTWGet").detail("Key", printable(setKey)).detail("Value", printable(val)).detail("Ver", tr.getReadVersion().get());
-						// if the value is already setValue then there is no point setting a watch so break out of the loop
+						// if the value is already setValue then there is no point setting a watch so break out of the
+						// loop
 						if (val == setValue)
 							break;
 						ASSERT(first);
@@ -148,7 +153,7 @@ struct FastTriggeredWatchesWorkload : TestWorkload {
 			}
 			return Void();
 		} catch (Error& e) {
-			TraceEvent(SevError, "FastWatchError").error(e, true);
+			TraceEvent(SevError, "FastWatchError").errorUnsuppressed(e);
 			throw;
 		}
 	}
@@ -162,9 +167,9 @@ struct FastTriggeredWatchesWorkload : TestWorkload {
 		return ok;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		double duration = testDuration;
-		m.push_back(PerfMetric("Operations/sec", operations.getValue() / duration, false));
+		m.emplace_back("Operations/sec", operations.getValue() / duration, Averaged::False);
 		m.push_back(operations.getMetric());
 		m.push_back(retries.getMetric());
 	}
@@ -181,4 +186,4 @@ struct FastTriggeredWatchesWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<FastTriggeredWatchesWorkload> FastTriggeredWatchesWorkloadFactory("FastTriggeredWatches");
+WorkloadFactory<FastTriggeredWatchesWorkload> FastTriggeredWatchesWorkloadFactory;

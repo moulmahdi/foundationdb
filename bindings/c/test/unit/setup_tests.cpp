@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 
 // Unit tests for API setup, network initialization functions from the FDB C API.
 
-#define FDB_API_VERSION 710
+#define FDB_API_VERSION 730
 #include <foundationdb/fdb_c.h>
 #include <iostream>
 #include <thread>
@@ -42,13 +42,13 @@ TEST_CASE("setup") {
 	CHECK(err);
 
 	// Select current API version
-	fdb_check(fdb_select_api_version(710));
+	fdb_check(fdb_select_api_version(FDB_API_VERSION));
 
 	// Error to call again after a successful return
-	err = fdb_select_api_version(710);
+	err = fdb_select_api_version(FDB_API_VERSION);
 	CHECK(err);
 
-	CHECK(fdb_get_max_api_version() >= 710);
+	CHECK(fdb_get_max_api_version() >= FDB_API_VERSION);
 
 	fdb_check(fdb_setup_network());
 	// Calling a second time should fail
@@ -66,7 +66,7 @@ TEST_CASE("setup") {
 	    },
 	    &context));
 
-	std::thread network_thread{ &fdb_run_network };
+	std::thread network_thread{ [] { fdb_check(fdb_run_network()); } };
 
 	CHECK(!context.called);
 	fdb_check(fdb_stop_network());

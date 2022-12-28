@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,20 +25,21 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct PubSubMultiplesWorkload : TestWorkload {
+	static constexpr auto NAME = "PubSubMultiples";
+
 	double testDuration, messagesPerSecond;
 	int actorCount, inboxesPerActor;
 
-	vector<Future<Void>> inboxWatchers;
+	std::vector<Future<Void>> inboxWatchers;
 	PerfIntCounter messages;
 
 	PubSubMultiplesWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), messages("Messages") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		messagesPerSecond = getOption(options, LiteralStringRef("messagesPerSecond"), 500.0) / clientCount;
-		actorCount = getOption(options, LiteralStringRef("actorsPerClient"), 20);
-		inboxesPerActor = getOption(options, LiteralStringRef("inboxesPerActor"), 20);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		messagesPerSecond = getOption(options, "messagesPerSecond"_sr, 500.0) / clientCount;
+		actorCount = getOption(options, "actorsPerClient"_sr, 20);
+		inboxesPerActor = getOption(options, "inboxesPerActor"_sr, 20);
 	}
 
-	std::string description() const override { return "PubSubMultiplesWorkload"; }
 	Future<Void> setup(Database const& cx) override { return createNodes(this, cx); }
 	Future<Void> start(Database const& cx) override {
 		Future<Void> _ = startTests(this, cx);
@@ -46,7 +47,7 @@ struct PubSubMultiplesWorkload : TestWorkload {
 	}
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override { m.push_back(messages.getMetric()); }
+	void getMetrics(std::vector<PerfMetric>& m) override { m.push_back(messages.getMetric()); }
 
 	Key keyForFeed(int i) { return StringRef(format("/PSM/feeds/%d", i)); }
 	Key keyForInbox(int i) { return StringRef(format("/PSM/inbox/%d", i)); }
@@ -54,8 +55,8 @@ struct PubSubMultiplesWorkload : TestWorkload {
 
 	ACTOR Future<Void> createNodeSwath(PubSubMultiplesWorkload* self, int actor, Database cx) {
 		state PubSub ps(cx);
-		state vector<uint64_t> feeds;
-		state vector<uint64_t> inboxes;
+		state std::vector<uint64_t> feeds;
+		state std::vector<uint64_t> inboxes;
 		state int idx;
 		for (idx = 0; idx < self->inboxesPerActor; idx++) {
 			uint64_t feedIdx = wait(ps.createFeed(StringRef()));
@@ -83,7 +84,7 @@ struct PubSubMultiplesWorkload : TestWorkload {
 
 	ACTOR Future<Void> createNodes(PubSubMultiplesWorkload* self, Database cx) {
 		state PubSub ps(cx);
-		vector<Future<Void>> actors;
+		std::vector<Future<Void>> actors;
 		actors.reserve(self->actorCount);
 		for (int i = 0; i < self->actorCount; i++)
 			actors.push_back(self->createNodeSwath(self, i, cx->clone()));
@@ -103,7 +104,7 @@ struct PubSubMultiplesWorkload : TestWorkload {
 	}
 
 	ACTOR Future<Void> startTests(PubSubMultiplesWorkload* self, Database cx) {
-		vector<Future<Void>> subscribers;
+		std::vector<Future<Void>> subscribers;
 		subscribers.reserve(self->actorCount);
 		for (int i = 0; i < self->actorCount; i++)
 			subscribers.push_back(self->createSubscriptions(self, i, cx));
@@ -114,4 +115,4 @@ struct PubSubMultiplesWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<PubSubMultiplesWorkload> PubSubMultiplesWorkloadFactory("PubSubMultiples");
+WorkloadFactory<PubSubMultiplesWorkload> PubSubMultiplesWorkloadFactory;

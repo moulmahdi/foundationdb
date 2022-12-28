@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,29 +19,30 @@
  */
 
 #include "fdbclient/BackupAgent.actor.h"
+#include "fdbclient/ClusterConnectionMemoryRecord.h"
 #include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
+#include "flow/ApiVersion.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct BackupToDBAbort : TestWorkload {
+	static constexpr auto NAME = "BackupToDBAbort";
 	double abortDelay;
 	Database extraDB;
 	Standalone<VectorRef<KeyRangeRef>> backupRanges;
 	UID lockid;
 
 	explicit BackupToDBAbort(const WorkloadContext& wcx) : TestWorkload(wcx) {
-		abortDelay = getOption(options, LiteralStringRef("abortDelay"), 50.0);
+		abortDelay = getOption(options, "abortDelay"_sr, 50.0);
 
-		backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
+		addDefaultBackupRanges(backupRanges);
 
-		auto extraFile = makeReference<ClusterConnectionFile>(*g_simulator.extraDB);
-		extraDB = Database::createDatabase(extraFile, -1);
+		ASSERT(g_simulator->extraDatabases.size() == 1);
+		extraDB = Database::createSimulatedExtraDatabase(g_simulator->extraDatabases[0], wcx.defaultTenant);
 
 		lockid = UID(0xbeeffeed, 0xdecaf00d);
 	}
-
-	std::string description() const override { return "BackupToDBAbort"; }
 
 	Future<Void> setup(const Database& cx) override {
 		if (clientId != 0)
@@ -90,8 +91,8 @@ struct BackupToDBAbort : TestWorkload {
 		TraceEvent("BDBA_End").log();
 
 		// SOMEDAY: Remove after backup agents can exist quiescently
-		if (g_simulator.drAgents == ISimulator::BackupAgentType::BackupToDB) {
-			g_simulator.drAgents = ISimulator::BackupAgentType::NoBackupAgents;
+		if (g_simulator->drAgents == ISimulator::BackupAgentType::BackupToDB) {
+			g_simulator->drAgents = ISimulator::BackupAgentType::NoBackupAgents;
 		}
 
 		return Void();
@@ -107,7 +108,7 @@ struct BackupToDBAbort : TestWorkload {
 
 	Future<bool> check(const Database& cx) override { return _check(this, cx); }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
 REGISTER_WORKLOAD(BackupToDBAbort);

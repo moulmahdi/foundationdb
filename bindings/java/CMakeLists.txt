@@ -27,20 +27,27 @@ set(JAVA_BINDING_SRCS
   src/main/com/apple/foundationdb/directory/package-info.java
   src/main/com/apple/foundationdb/directory/PathUtil.java
   src/main/com/apple/foundationdb/DirectBufferIterator.java
+  src/main/com/apple/foundationdb/RangeResultDirectBufferIterator.java
+  src/main/com/apple/foundationdb/MappedRangeResultDirectBufferIterator.java
   src/main/com/apple/foundationdb/DirectBufferPool.java
   src/main/com/apple/foundationdb/FDB.java
   src/main/com/apple/foundationdb/FDBDatabase.java
+  src/main/com/apple/foundationdb/FDBTenant.java
   src/main/com/apple/foundationdb/FDBTransaction.java
+  src/main/com/apple/foundationdb/FutureBool.java
   src/main/com/apple/foundationdb/FutureInt64.java
   src/main/com/apple/foundationdb/FutureKey.java
   src/main/com/apple/foundationdb/FutureKeyArray.java
+  src/main/com/apple/foundationdb/FutureKeyRangeArray.java
   src/main/com/apple/foundationdb/FutureResult.java
   src/main/com/apple/foundationdb/FutureResults.java
+  src/main/com/apple/foundationdb/FutureMappedResults.java
   src/main/com/apple/foundationdb/FutureStrings.java
   src/main/com/apple/foundationdb/FutureVoid.java
   src/main/com/apple/foundationdb/JNIUtil.java
   src/main/com/apple/foundationdb/KeySelector.java
   src/main/com/apple/foundationdb/KeyValue.java
+  src/main/com/apple/foundationdb/MappedKeyValue.java
   src/main/com/apple/foundationdb/LocalityUtil.java
   src/main/com/apple/foundationdb/NativeFuture.java
   src/main/com/apple/foundationdb/NativeObjectWrapper.java
@@ -49,14 +56,20 @@ set(JAVA_BINDING_SRCS
   src/main/com/apple/foundationdb/package-info.java
   src/main/com/apple/foundationdb/Range.java
   src/main/com/apple/foundationdb/RangeQuery.java
+  src/main/com/apple/foundationdb/MappedRangeQuery.java
   src/main/com/apple/foundationdb/KeyArrayResult.java
+  src/main/com/apple/foundationdb/KeyRangeArrayResult.java
   src/main/com/apple/foundationdb/RangeResult.java
+  src/main/com/apple/foundationdb/MappedRangeResult.java
   src/main/com/apple/foundationdb/RangeResultInfo.java
+  src/main/com/apple/foundationdb/MappedRangeResultInfo.java
   src/main/com/apple/foundationdb/RangeResultSummary.java
   src/main/com/apple/foundationdb/ReadTransaction.java
   src/main/com/apple/foundationdb/ReadTransactionContext.java
   src/main/com/apple/foundationdb/subspace/package-info.java
   src/main/com/apple/foundationdb/subspace/Subspace.java
+  src/main/com/apple/foundationdb/Tenant.java
+  src/main/com/apple/foundationdb/TenantManagement.java
   src/main/com/apple/foundationdb/Transaction.java
   src/main/com/apple/foundationdb/TransactionContext.java
   src/main/com/apple/foundationdb/EventKeeper.java
@@ -127,32 +140,36 @@ vexillographer_compile(TARGET fdb_java_options LANG java OUT ${GENERATED_JAVA_DI
   OUTPUT ${GENERATED_JAVA_FILES})
 
 set(SYSTEM_NAME "linux")
-if (APPLE)
+if(APPLE)
   set(SYSTEM_NAME "osx")
 endif()
 
 if(OPEN_FOR_IDE)
   add_library(fdb_java OBJECT fdbJNI.cpp)
-  add_library(java_workloads OBJECT JavaWorkload.cpp)
 else()
   add_library(fdb_java SHARED fdbJNI.cpp)
   add_library(java_workloads SHARED JavaWorkload.cpp)
+  target_link_libraries(java_workloads PRIVATE fdb_java_native)
 endif()
 
-if (NOT WIN32 AND NOT APPLE AND NOT OPEN_FOR_IDE)
+if(NOT WIN32 AND NOT APPLE AND NOT OPEN_FOR_IDE)
   target_link_options(java_workloads PRIVATE "LINKER:--version-script=${CMAKE_SOURCE_DIR}/bindings/c/external_workload.map,-z,nodelete")
 endif()
 
 target_include_directories(fdb_java PRIVATE ${JNI_INCLUDE_DIRS})
 # libfdb_java.so is loaded by fdb-java.jar and doesn't need to depened on jvm shared libraries.
 target_link_libraries(fdb_java PRIVATE fdb_c)
+target_link_libraries(fdb_java PRIVATE fdb_java_native)
 if(APPLE)
   set_target_properties(fdb_java PROPERTIES SUFFIX ".jnilib")
 endif()
-set_target_properties(java_workloads PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/share/foundationdb")
-target_link_libraries(java_workloads PUBLIC fdb_c ${JNI_LIBRARIES})
-target_include_directories(java_workloads PUBLIC ${JNI_INCLUDE_DIRS})
+if(NOT OPEN_FOR_IDE)
+  set_target_properties(java_workloads PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/share/foundationdb")
+  target_link_libraries(java_workloads PUBLIC fdb_c ${JNI_LIBRARIES})
+  target_link_libraries(java_workloads PRIVATE flow) # mostly for boost
+  target_include_directories(java_workloads PUBLIC ${JNI_INCLUDE_DIRS})
+endif()
 
 set(CMAKE_JAVA_COMPILE_FLAGS "-source" "1.8" "-target" "1.8" "-XDignore.symbol.file")
 set(CMAKE_JNI_TARGET TRUE)
@@ -182,8 +199,8 @@ set(MANIFEST_FILE ${CMAKE_CURRENT_BINARY_DIR}/resources/META-INF/MANIFEST.MF)
 file(WRITE ${MANIFEST_FILE} ${MANIFEST_TEXT})
 
 add_jar(fdb-java ${JAVA_BINDING_SRCS} ${GENERATED_JAVA_FILES} ${CMAKE_SOURCE_DIR}/LICENSE
-  OUTPUT_DIR ${PROJECT_BINARY_DIR}/lib VERSION ${CMAKE_PROJECT_VERSION} MANIFEST ${MANIFEST_FILE})
-add_dependencies(fdb-java fdb_java_options fdb_java)
+  OUTPUT_DIR ${PROJECT_BINARY_DIR}/lib VERSION ${FDB_VERSION} MANIFEST ${MANIFEST_FILE} GENERATE_NATIVE_HEADERS fdb_java_native)
+add_dependencies(fdb-java fdb_java_options)
 
 if(NOT OPEN_FOR_IDE)
   set(FAT_JAR_BINARIES "NOTFOUND" CACHE STRING
@@ -218,31 +235,38 @@ if(NOT OPEN_FOR_IDE)
   if(WIN32)
     set(lib_destination "windows/amd64")
   elseif(APPLE)
-    set(lib_destination "osx/x86_64")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+      set(lib_destination "osx/aarch64")
+    else()
+      set(lib_destination "osx/x86_64")
+    endif()
   else()
-   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-     set(lib_destination "linux/aarch64")
-   else()
-     set(lib_destination "linux/amd64")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+      set(lib_destination "linux/aarch64")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
+      set(lib_destination "linux/ppc64le")
+    else()
+      set(lib_destination "linux/amd64")
     endif()
   endif()
-	set(lib_destination "${unpack_dir}/lib/${lib_destination}")
-	set(jni_package "${CMAKE_BINARY_DIR}/packages/lib")
+  set(lib_destination "${unpack_dir}/lib/${lib_destination}")
+  set(jni_package "${CMAKE_BINARY_DIR}/packages/lib")
   file(MAKE_DIRECTORY ${lib_destination})
-	file(MAKE_DIRECTORY ${jni_package})
+  file(MAKE_DIRECTORY ${jni_package})
   add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lib_copied
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:fdb_java> ${lib_destination} &&
     ${CMAKE_COMMAND} -E copy $<TARGET_FILE:fdb_java> ${jni_package} &&
     ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/lib_copied
+    DEPENDS fdb_java
     COMMENT "Copy jni library for fat jar")
   add_custom_target(copy_lib DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/lib_copied)
   add_dependencies(copy_lib unpack_jar)
   if(NOT FDB_RELEASE)
-    set(prerelease_string "-PRERELEASE")
+    set(not_fdb_release_string "-SNAPSHOT")
   else()
-    set(prerelease_string "")
+    set(not_fdb_release_string "")
   endif()
-  set(target_jar ${jar_destination}/fdb-java-${CMAKE_PROJECT_VERSION}${prerelease_string}.jar)
+  set(target_jar ${jar_destination}/fdb-java-${FDB_VERSION}${not_fdb_release_string}.jar)
   add_custom_command(OUTPUT ${target_jar}
     COMMAND ${Java_JAR_EXECUTABLE} cfm ${target_jar} ${unpack_dir}/META-INF/MANIFEST.MF .
     WORKING_DIRECTORY ${unpack_dir}
@@ -250,7 +274,7 @@ if(NOT OPEN_FOR_IDE)
     COMMENT "Build ${target_jar}")
   add_jar(foundationdb-tests SOURCES ${JAVA_TESTS_SRCS} INCLUDE_JARS fdb-java)
   add_dependencies(foundationdb-tests fdb_java_options)
-  set(tests_jar ${jar_destination}/fdb-java-${CMAKE_PROJECT_VERSION}${prerelease_string}-tests.jar)
+  set(tests_jar ${jar_destination}/fdb-java-${FDB_VERSION}${not_fdb_release_string}-tests.jar)
   add_custom_command(OUTPUT ${tests_jar}
     COMMAND ${CMAKE_COMMAND} -E copy foundationdb-tests.jar "${tests_jar}"
     WORKING_DIRECTORY .
@@ -260,13 +284,14 @@ if(NOT OPEN_FOR_IDE)
   add_dependencies(fdb-java-tests foundationdb-tests)
   add_custom_target(fat-jar ALL DEPENDS ${target_jar})
   add_dependencies(fat-jar fdb-java)
+  add_dependencies(fat-jar fdb_java)
   add_dependencies(fat-jar copy_lib)
   add_dependencies(packages fat-jar)
 
   set(TEST_CP ${tests_jar} ${target_jar})
 
   if(RUN_JUNIT_TESTS OR RUN_JAVA_INTEGRATION_TESTS)
-    if (USE_SANITIZER)
+    if(USE_SANITIZER)
       message(WARNING "Cannot run java tests with sanitizer builds")
       return()
     endif()
@@ -275,7 +300,7 @@ if(NOT OPEN_FOR_IDE)
     file(DOWNLOAD "https://search.maven.org/remotecontent?filepath=org/junit/jupiter/junit-jupiter-engine/5.7.1/junit-jupiter-engine-5.7.1.jar"
       ${CMAKE_BINARY_DIR}/packages/junit-jupiter-engine-5.7.1.jar
       EXPECTED_HASH SHA256=56616c9350b3624f76cffef6b24ce7bb222915bfd5688f96d3cf4cef34f077cb)
-      # https://search.maven.org/remotecontent?filepath=org/junit/jupiter/junit-jupiter-api/5.7.1/junit-jupiter-api-5.7.1.jar
+    # https://search.maven.org/remotecontent?filepath=org/junit/jupiter/junit-jupiter-api/5.7.1/junit-jupiter-api-5.7.1.jar
     file(DOWNLOAD "https://search.maven.org/remotecontent?filepath=org/junit/jupiter/junit-jupiter-api/5.7.1/junit-jupiter-api-5.7.1.jar"
       ${CMAKE_BINARY_DIR}/packages/junit-jupiter-api-5.7.1.jar
       EXPECTED_HASH SHA256=ce7b985bc469e2625759a4ebc45533c70581a05a348278c1d6408e9b2e35e314)
@@ -326,20 +351,20 @@ if(NOT OPEN_FOR_IDE)
     # can be found at https://cmake.org/cmake/help/v3.19/manual/ctest.1.html)
 
     add_jar(fdb-junit SOURCES ${JAVA_JUNIT_TESTS} ${JUNIT_RESOURCES} INCLUDE_JARS fdb-java
-            ${CMAKE_BINARY_DIR}/packages/junit-jupiter-api-5.7.1.jar
-            ${CMAKE_BINARY_DIR}/packages/junit-jupiter-engine-5.7.1.jar
-            ${CMAKE_BINARY_DIR}/packages/junit-jupiter-params-5.7.1.jar
-            ${CMAKE_BINARY_DIR}/packages/opentest4j-1.2.0.jar
-            ${CMAKE_BINARY_DIR}/packages/apiguardian-api-1.1.1.jar
-    )
+      ${CMAKE_BINARY_DIR}/packages/junit-jupiter-api-5.7.1.jar
+      ${CMAKE_BINARY_DIR}/packages/junit-jupiter-engine-5.7.1.jar
+      ${CMAKE_BINARY_DIR}/packages/junit-jupiter-params-5.7.1.jar
+      ${CMAKE_BINARY_DIR}/packages/opentest4j-1.2.0.jar
+      ${CMAKE_BINARY_DIR}/packages/apiguardian-api-1.1.1.jar
+      )
     get_property(junit_jar_path TARGET fdb-junit PROPERTY JAR_FILE)
 
     add_test(NAME java-unit
       COMMAND ${Java_JAVA_EXECUTABLE}
-            -classpath "${target_jar}:${junit_jar_path}:${JUNIT_CLASSPATH}"
-            -Djava.library.path=${CMAKE_BINARY_DIR}/lib
-            org.junit.platform.console.ConsoleLauncher "--details=summary" "-class-path=${junit_jar_path}" "--scan-classpath" "--disable-banner"
-    )
+      -classpath "${target_jar}:${junit_jar_path}:${JUNIT_CLASSPATH}"
+      -Djava.library.path=${CMAKE_BINARY_DIR}/lib
+      org.junit.platform.console.ConsoleLauncher "--details=summary" "-class-path=${junit_jar_path}" "--scan-classpath" "--disable-banner"
+      )
 
   endif()
 
@@ -369,28 +394,28 @@ if(NOT OPEN_FOR_IDE)
     # the directory layer with a unique path, etc.)
     #
     add_jar(fdb-integration SOURCES ${JAVA_INTEGRATION_TESTS} ${JAVA_INTEGRATION_RESOURCES} INCLUDE_JARS fdb-java
-            ${CMAKE_BINARY_DIR}/packages/junit-jupiter-api-5.7.1.jar
-            ${CMAKE_BINARY_DIR}/packages/junit-jupiter-engine-5.7.1.jar
-            ${CMAKE_BINARY_DIR}/packages/junit-jupiter-params-5.7.1.jar
-            ${CMAKE_BINARY_DIR}/packages/opentest4j-1.2.0.jar
-            ${CMAKE_BINARY_DIR}/packages/apiguardian-api-1.1.1.jar)
+      ${CMAKE_BINARY_DIR}/packages/junit-jupiter-api-5.7.1.jar
+      ${CMAKE_BINARY_DIR}/packages/junit-jupiter-engine-5.7.1.jar
+      ${CMAKE_BINARY_DIR}/packages/junit-jupiter-params-5.7.1.jar
+      ${CMAKE_BINARY_DIR}/packages/opentest4j-1.2.0.jar
+      ${CMAKE_BINARY_DIR}/packages/apiguardian-api-1.1.1.jar)
     get_property(integration_jar_path TARGET fdb-integration PROPERTY JAR_FILE)
 
 
     # add_fdbclient_test will set FDB_CLUSTER_FILE if it's not set already
     add_fdbclient_test(NAME java-integration
-                    COMMAND ${Java_JAVA_EXECUTABLE}
-                      -classpath "${target_jar}:${integration_jar_path}:${JUNIT_CLASSPATH}"
-                      -Djava.library.path=${CMAKE_BINARY_DIR}/lib
-                      org.junit.platform.console.ConsoleLauncher "--details=summary" "--class-path=${integration_jar_path}" "--scan-classpath" "--disable-banner" "-T MultiClient"
-    )
+      COMMAND ${Java_JAVA_EXECUTABLE}
+      -classpath "${target_jar}:${integration_jar_path}:${JUNIT_CLASSPATH}"
+      -Djava.library.path=${CMAKE_BINARY_DIR}/lib
+      org.junit.platform.console.ConsoleLauncher "--details=summary" "--class-path=${integration_jar_path}" "--scan-classpath" "--disable-banner" "-T MultiClient"
+      )
 
     add_multi_fdbclient_test(NAME java-multi-integration
-                    COMMAND ${Java_JAVA_EXECUTABLE}
-                    -classpath "${target_jar}:${integration_jar_path}:${JUNIT_CLASSPATH}"
-                    -Djava.library.path=${CMAKE_BINARY_DIR}/lib
-                    org.junit.platform.console.ConsoleLauncher "--details=summary" "--class-path=${integration_jar_path}" "--scan-classpath" "--disable-banner" "-t MultiClient"
-    )
+      COMMAND ${Java_JAVA_EXECUTABLE}
+      -classpath "${target_jar}:${integration_jar_path}:${JUNIT_CLASSPATH}"
+      -Djava.library.path=${CMAKE_BINARY_DIR}/lib
+      org.junit.platform.console.ConsoleLauncher "--details=summary" "--class-path=${integration_jar_path}" "--scan-classpath" "--disable-banner" "-t MultiClient"
+      )
 
   endif()
 endif()

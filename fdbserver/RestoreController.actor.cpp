@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,8 @@
 #include "flow/Platform.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-ACTOR static Future<Void> clearDB(Database cx);
+// TODO: Support [[maybe_unused]] attribute for actors
+// ACTOR static Future<Void> clearDB(Database cx);
 ACTOR static Future<Version> collectBackupFiles(Reference<IBackupContainer> bc,
                                                 std::vector<RestoreFileFR>* rangeFiles,
                                                 std::vector<RestoreFileFR>* logFiles,
@@ -46,7 +47,9 @@ ACTOR static Future<Version> collectBackupFiles(Reference<IBackupContainer> bc,
                                                 RestoreRequest request);
 ACTOR static Future<Void> buildRangeVersions(KeyRangeMap<Version>* pRangeVersions,
                                              std::vector<RestoreFileFR>* pRangeFiles,
-                                             Key url);
+                                             Key url,
+                                             Optional<std::string> proxy,
+                                             Optional<Database> cx);
 
 ACTOR static Future<Version> processRestoreRequest(Reference<RestoreControllerData> self,
                                                    Database cx,
@@ -76,7 +79,8 @@ ACTOR static Future<Void> notifyLoadersVersionBatchFinished(std::map<UID, Restor
                                                             int batchIndex);
 ACTOR static Future<Void> notifyRestoreCompleted(Reference<RestoreControllerData> self, bool terminate);
 ACTOR static Future<Void> signalRestoreCompleted(Reference<RestoreControllerData> self, Database cx);
-ACTOR static Future<Void> updateHeartbeatTime(Reference<RestoreControllerData> self);
+// TODO: Support [[maybe_unused]] attribute for actors
+// ACTOR static Future<Void> updateHeartbeatTime(Reference<RestoreControllerData> self);
 ACTOR static Future<Void> checkRolesLiveness(Reference<RestoreControllerData> self);
 
 void splitKeyRangeForAppliers(Reference<ControllerBatchData> batchData,
@@ -134,7 +138,7 @@ ACTOR Future<Void> startRestoreController(Reference<RestoreWorkerData> controlle
 		wait(startProcessRestoreRequests(self, cx) || error);
 	} catch (Error& e) {
 		if (e.code() != error_code_operation_cancelled) {
-			TraceEvent(SevError, "FastRestoreControllerStart").detail("Reason", "Unexpected unhandled error").error(e);
+			TraceEvent(SevError, "FastRestoreControllerStart").error(e).detail("Reason", "Unexpected unhandled error");
 		}
 	}
 
@@ -315,7 +319,7 @@ ACTOR static Future<Version> processRestoreRequest(Reference<RestoreControllerDa
 	state std::vector<RestoreFileFR> allFiles;
 	state Version minRangeVersion = MAX_VERSION;
 
-	self->initBackupContainer(request.url);
+	self->initBackupContainer(request.url, request.proxy);
 
 	// Get all backup files' description and save them to files
 	state Version targetVersion =
@@ -332,7 +336,7 @@ ACTOR static Future<Version> processRestoreRequest(Reference<RestoreControllerDa
 	// Build range versions: version of key ranges in range file
 	state KeyRangeMap<Version> rangeVersions(minRangeVersion, allKeys.end);
 	if (SERVER_KNOBS->FASTRESTORE_GET_RANGE_VERSIONS_EXPENSIVE) {
-		wait(buildRangeVersions(&rangeVersions, &rangeFiles, request.url));
+		wait(buildRangeVersions(&rangeVersions, &rangeFiles, request.url, request.proxy, cx));
 	} else {
 		// Debug purpose, dump range versions
 		auto ranges = rangeVersions.ranges();
@@ -654,12 +658,12 @@ void splitKeyRangeForAppliers(Reference<ControllerBatchData> batchData,
 	    .detail("SlotSize", slotSize);
 
 	std::set<Key> keyrangeSplitter; // unique key to split key range for appliers
-	keyrangeSplitter.insert(normalKeys.begin); // First slot
+	keyrangeSplitter.insert(allKeys.begin); // First slot
 	TraceEvent("FastRestoreControllerPhaseCalculateApplierKeyRanges")
 	    .detail("BatchIndex", batchIndex)
 	    .detail("CumulativeSize", cumulativeSize)
 	    .detail("Slot", 0)
-	    .detail("LowerBoundKey", normalKeys.begin);
+	    .detail("LowerBoundKey", allKeys.begin);
 	int slotIdx = 1;
 	while (cumulativeSize < batchData->samplesSize) {
 		IndexedSet<Key, int64_t>::iterator lowerBound = batchData->samples.index(cumulativeSize);
@@ -771,7 +775,7 @@ ACTOR static Future<Version> collectBackupFiles(Reference<IBackupContainer> bc,
 
 	state VectorRef<KeyRangeRef> restoreRanges;
 	restoreRanges.add(request.range);
-	Optional<RestorableFileSet> restorable = wait(bc->getRestoreSet(request.targetVersion, restoreRanges));
+	Optional<RestorableFileSet> restorable = wait(bc->getRestoreSet(request.targetVersion, cx, restoreRanges));
 
 	if (!restorable.present()) {
 		TraceEvent(SevWarn, "FastRestoreControllerPhaseCollectBackupFiles")
@@ -840,12 +844,13 @@ ACTOR static Future<Version> collectBackupFiles(Reference<IBackupContainer> bc,
 // set (beginKey, endKey) and file->version to pRangeVersions
 ACTOR static Future<Void> insertRangeVersion(KeyRangeMap<Version>* pRangeVersions,
                                              RestoreFileFR* file,
-                                             Reference<IBackupContainer> bc) {
+                                             Reference<IBackupContainer> bc,
+                                             Optional<Database> cx) {
 	TraceEvent("FastRestoreControllerDecodeRangeVersion").detail("File", file->toString());
 	RangeFile rangeFile = { file->version, (uint32_t)file->blockSize, file->fileName, file->fileSize };
 
 	// First and last key are the range for this file: endKey is exclusive
-	KeyRange fileRange = wait(bc->getSnapshotFileKeyRange(rangeFile));
+	KeyRange fileRange = wait(bc->getSnapshotFileKeyRange(rangeFile, cx));
 	TraceEvent("FastRestoreControllerInsertRangeVersion")
 	    .detail("DecodedRangeFile", file->fileName)
 	    .detail("KeyRange", fileRange)
@@ -856,18 +861,20 @@ ACTOR static Future<Void> insertRangeVersion(KeyRangeMap<Version>* pRangeVersion
 		r->value() = std::max(r->value(), file->version);
 	}
 
-	// Dump the new key ranges
-	ranges = pRangeVersions->ranges();
-	int i = 0;
-	for (auto r = ranges.begin(); r != ranges.end(); ++r) {
-		TraceEvent(SevDebug, "RangeVersionsAfterUpdate")
-		    .detail("File", file->toString())
-		    .detail("FileRange", fileRange.toString())
-		    .detail("FileVersion", file->version)
-		    .detail("RangeIndex", i++)
-		    .detail("RangeBegin", r->begin())
-		    .detail("RangeEnd", r->end())
-		    .detail("RangeVersion", r->value());
+	if (SERVER_KNOBS->FASTRESTORE_DUMP_INSERT_RANGE_VERSION) {
+		// Dump the new key ranges for debugging purpose.
+		ranges = pRangeVersions->ranges();
+		int i = 0;
+		for (auto r = ranges.begin(); r != ranges.end(); ++r) {
+			TraceEvent(SevDebug, "RangeVersionsAfterUpdate")
+			    .detail("File", file->toString())
+			    .detail("FileRange", fileRange.toString())
+			    .detail("FileVersion", file->version)
+			    .detail("RangeIndex", i++)
+			    .detail("RangeBegin", r->begin())
+			    .detail("RangeEnd", r->end())
+			    .detail("RangeVersion", r->value());
+		}
 	}
 
 	return Void();
@@ -877,20 +884,22 @@ ACTOR static Future<Void> insertRangeVersion(KeyRangeMap<Version>* pRangeVersion
 // Expensive and slow operation that should not run in real prod.
 ACTOR static Future<Void> buildRangeVersions(KeyRangeMap<Version>* pRangeVersions,
                                              std::vector<RestoreFileFR>* pRangeFiles,
-                                             Key url) {
+                                             Key url,
+                                             Optional<std::string> proxy,
+                                             Optional<Database> cx) {
 	if (!g_network->isSimulated()) {
 		TraceEvent(SevError, "ExpensiveBuildRangeVersions")
 		    .detail("Reason", "Parsing all range files is slow and memory intensive");
 		return Void();
 	}
-	Reference<IBackupContainer> bc = IBackupContainer::openContainer(url.toString());
+	Reference<IBackupContainer> bc = IBackupContainer::openContainer(url.toString(), proxy, {});
 
 	// Key ranges not in range files are empty;
 	// Assign highest version to avoid applying any mutation in these ranges
 	state int fileIndex = 0;
 	state std::vector<Future<Void>> fInsertRangeVersions;
 	for (; fileIndex < pRangeFiles->size(); ++fileIndex) {
-		fInsertRangeVersions.push_back(insertRangeVersion(pRangeVersions, &pRangeFiles->at(fileIndex), bc));
+		fInsertRangeVersions.push_back(insertRangeVersion(pRangeVersions, &pRangeFiles->at(fileIndex), bc, cx));
 	}
 
 	wait(waitForAll(fInsertRangeVersions));
@@ -898,16 +907,18 @@ ACTOR static Future<Void> buildRangeVersions(KeyRangeMap<Version>* pRangeVersion
 	return Void();
 }
 
+/*
 ACTOR static Future<Void> clearDB(Database cx) {
-	wait(runRYWTransaction(cx, [](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
-		tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
-		tr->setOption(FDBTransactionOptions::LOCK_AWARE);
-		tr->clear(normalKeys);
-		return Void();
-	}));
+    wait(runRYWTransaction(cx, [](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
+        tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+        tr->setOption(FDBTransactionOptions::LOCK_AWARE);
+        tr->clear(normalKeys);
+        return Void();
+    }));
 
-	return Void();
+    return Void();
 }
+*/
 
 ACTOR static Future<Void> initializeVersionBatch(std::map<UID, RestoreApplierInterface> appliersInterf,
                                                  std::map<UID, RestoreLoaderInterface> loadersInterf,
@@ -1133,67 +1144,69 @@ ACTOR static Future<Void> signalRestoreCompleted(Reference<RestoreControllerData
 	return Void();
 }
 
-// Update the most recent time when controller receives hearbeat from each loader and applier
+/*
+// Update the most recent time when controller receives heartbeat from each loader and applier
 // TODO: Replace the heartbeat mechanism with FDB failure monitoring mechanism
 ACTOR static Future<Void> updateHeartbeatTime(Reference<RestoreControllerData> self) {
-	wait(self->recruitedRoles.getFuture());
+    wait(self->recruitedRoles.getFuture());
 
-	int numRoles = self->loadersInterf.size() + self->appliersInterf.size();
-	state std::map<UID, RestoreLoaderInterface>::iterator loader = self->loadersInterf.begin();
-	state std::map<UID, RestoreApplierInterface>::iterator applier = self->appliersInterf.begin();
-	state std::vector<Future<RestoreCommonReply>> fReplies(numRoles, Never()); // TODO: Reserve memory for this vector
-	state std::vector<UID> nodes;
-	state int index = 0;
-	state Future<Void> fTimeout = Void();
+    int numRoles = self->loadersInterf.size() + self->appliersInterf.size();
+    state std::map<UID, RestoreLoaderInterface>::iterator loader = self->loadersInterf.begin();
+    state std::map<UID, RestoreApplierInterface>::iterator applier = self->appliersInterf.begin();
+    state std::vector<Future<RestoreCommonReply>> fReplies(numRoles, Never()); // TODO: Reserve memory for this vector
+    state std::vector<UID> nodes;
+    state int index = 0;
+    state Future<Void> fTimeout = Void();
 
-	// Initialize nodes only once
-	std::transform(self->loadersInterf.begin(),
-	               self->loadersInterf.end(),
-	               std::back_inserter(nodes),
-	               [](const std::pair<UID, RestoreLoaderInterface>& in) { return in.first; });
-	std::transform(self->appliersInterf.begin(),
-	               self->appliersInterf.end(),
-	               std::back_inserter(nodes),
-	               [](const std::pair<UID, RestoreApplierInterface>& in) { return in.first; });
+    // Initialize nodes only once
+    std::transform(self->loadersInterf.begin(),
+                   self->loadersInterf.end(),
+                   std::back_inserter(nodes),
+                   [](const std::pair<UID, RestoreLoaderInterface>& in) { return in.first; });
+    std::transform(self->appliersInterf.begin(),
+                   self->appliersInterf.end(),
+                   std::back_inserter(nodes),
+                   [](const std::pair<UID, RestoreApplierInterface>& in) { return in.first; });
 
-	loop {
-		loader = self->loadersInterf.begin();
-		applier = self->appliersInterf.begin();
-		index = 0;
-		std::fill(fReplies.begin(), fReplies.end(), Never());
-		// ping loaders and appliers
-		while (loader != self->loadersInterf.end()) {
-			fReplies[index] = loader->second.heartbeat.getReply(RestoreSimpleRequest());
-			loader++;
-			index++;
-		}
-		while (applier != self->appliersInterf.end()) {
-			fReplies[index] = applier->second.heartbeat.getReply(RestoreSimpleRequest());
-			applier++;
-			index++;
-		}
+    loop {
+        loader = self->loadersInterf.begin();
+        applier = self->appliersInterf.begin();
+        index = 0;
+        std::fill(fReplies.begin(), fReplies.end(), Never());
+        // ping loaders and appliers
+        while (loader != self->loadersInterf.end()) {
+            fReplies[index] = loader->second.heartbeat.getReply(RestoreSimpleRequest());
+            loader++;
+            index++;
+        }
+        while (applier != self->appliersInterf.end()) {
+            fReplies[index] = applier->second.heartbeat.getReply(RestoreSimpleRequest());
+            applier++;
+            index++;
+        }
 
-		fTimeout = delay(SERVER_KNOBS->FASTRESTORE_HEARTBEAT_DELAY);
+        fTimeout = delay(SERVER_KNOBS->FASTRESTORE_HEARTBEAT_DELAY);
 
-		// Here we have to handle error, otherwise controller worker will fail and exit.
-		try {
-			wait(waitForAll(fReplies) || fTimeout);
-		} catch (Error& e) {
-			// This should be an ignorable error.
-			TraceEvent(g_network->isSimulated() ? SevWarnAlways : SevError, "FastRestoreUpdateHeartbeatError").error(e);
-		}
+        // Here we have to handle error, otherwise controller worker will fail and exit.
+        try {
+            wait(waitForAll(fReplies) || fTimeout);
+        } catch (Error& e) {
+            // This should be an ignorable error.
+            TraceEvent(g_network->isSimulated() ? SevWarnAlways : SevError, "FastRestoreUpdateHeartbeatError").error(e);
+        }
 
-		// Update the most recent heart beat time for each role
-		for (int i = 0; i < fReplies.size(); ++i) {
-			if (!fReplies[i].isError() && fReplies[i].isReady()) {
-				double currentTime = now();
-				auto item = self->rolesHeartBeatTime.emplace(nodes[i], currentTime);
-				item.first->second = currentTime;
-			}
-		}
-		wait(fTimeout); // Ensure not updating heartbeat too quickly
-	}
+        // Update the most recent heart beat time for each role
+        for (int i = 0; i < fReplies.size(); ++i) {
+            if (!fReplies[i].isError() && fReplies[i].isReady()) {
+                double currentTime = now();
+                auto item = self->rolesHeartBeatTime.emplace(nodes[i], currentTime);
+                item.first->second = currentTime;
+            }
+        }
+        wait(fTimeout); // Ensure not updating heartbeat too quickly
+    }
 }
+*/
 
 // Check if a restore role dies or disconnected
 ACTOR static Future<Void> checkRolesLiveness(Reference<RestoreControllerData> self) {

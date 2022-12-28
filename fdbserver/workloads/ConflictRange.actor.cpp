@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,25 +29,24 @@
 // (sim2.actor.cpp)
 
 struct ConflictRangeWorkload : TestWorkload {
+	static constexpr auto NAME = "ConflictRange";
 	int minOperationsPerTransaction, maxOperationsPerTransaction, maxKeySpace, maxOffset, minInitialAmount,
 	    maxInitialAmount;
 	double testDuration;
 	bool testReadYourWrites;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter withConflicts, withoutConflicts, retries;
 
 	ConflictRangeWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), withConflicts("WithConflicts"), withoutConflicts("withoutConflicts"), retries("Retries") {
-		minOperationsPerTransaction = getOption(options, LiteralStringRef("minOperationsPerTransaction"), 2);
-		maxOperationsPerTransaction = getOption(options, LiteralStringRef("minOperationsPerTransaction"), 4);
-		maxKeySpace = getOption(options, LiteralStringRef("maxKeySpace"), 100);
-		maxOffset = getOption(options, LiteralStringRef("maxOffset"), 5);
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		testReadYourWrites = getOption(options, LiteralStringRef("testReadYourWrites"), false);
+		minOperationsPerTransaction = getOption(options, "minOperationsPerTransaction"_sr, 2);
+		maxOperationsPerTransaction = getOption(options, "minOperationsPerTransaction"_sr, 4);
+		maxKeySpace = getOption(options, "maxKeySpace"_sr, 100);
+		maxOffset = getOption(options, "maxOffset"_sr, 5);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		testReadYourWrites = getOption(options, "testReadYourWrites"_sr, false);
 	}
-
-	std::string description() const override { return "ConflictRange"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -58,7 +57,7 @@ struct ConflictRangeWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(withConflicts.getMetric());
 		m.push_back(withoutConflicts.getMetric());
 		m.push_back(retries.getMetric());
@@ -80,6 +79,7 @@ struct ConflictRangeWorkload : TestWorkload {
 		state int offsetA;
 		state int offsetB;
 		state int randomLimit;
+		state Reverse reverse = Reverse::False;
 		state bool randomSets = false;
 		state std::set<int> insertedSet;
 		state RangeResult originalResults;
@@ -92,6 +92,10 @@ struct ConflictRangeWorkload : TestWorkload {
 		if (g_network->isSimulated()) {
 			wait(timeKeeperSetDisable(cx));
 		}
+
+		// Set one key after the end of the tested range. If this key is included in the result, then
+		// we may have drifted into the system key-space and cannot evaluate the result.
+		state Key sentinelKey = StringRef(format("%010d", self->maxKeySpace));
 
 		loop {
 			randomSets = !randomSets;
@@ -127,6 +131,8 @@ struct ConflictRangeWorkload : TestWorkload {
 						}
 					}
 
+					tr0.set(sentinelKey, deterministicRandom()->randomUniqueID().toString());
+
 					wait(tr0.commit());
 					break;
 				} catch (Error& e) {
@@ -153,10 +159,13 @@ struct ConflictRangeWorkload : TestWorkload {
 					offsetA = deterministicRandom()->randomInt(-1 * self->maxOffset, self->maxOffset);
 					offsetB = deterministicRandom()->randomInt(-1 * self->maxOffset, self->maxOffset);
 					randomLimit = deterministicRandom()->randomInt(1, self->maxKeySpace);
+					reverse.set(deterministicRandom()->coinflip());
 
 					RangeResult res = wait(tr1.getRange(KeySelectorRef(StringRef(myKeyA), onEqualA, offsetA),
 					                                    KeySelectorRef(StringRef(myKeyB), onEqualB, offsetB),
-					                                    randomLimit));
+					                                    randomLimit,
+					                                    Snapshot::False,
+					                                    reverse));
 					if (res.size()) {
 						originalResults = res;
 						break;
@@ -177,7 +186,6 @@ struct ConflictRangeWorkload : TestWorkload {
 
 				if (self->testReadYourWrites) {
 					trRYOW.setVersion(readVersion);
-					trRYOW.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
 				} else
 					tr3.setVersion(readVersion);
 
@@ -220,13 +228,17 @@ struct ConflictRangeWorkload : TestWorkload {
 						                         StringRef(format("%010d", clearedEnd))));
 						RangeResult res = wait(trRYOW.getRange(KeySelectorRef(StringRef(myKeyA), onEqualA, offsetA),
 						                                       KeySelectorRef(StringRef(myKeyB), onEqualB, offsetB),
-						                                       randomLimit));
+						                                       randomLimit,
+						                                       Snapshot::False,
+						                                       reverse));
 						wait(trRYOW.commit());
 					} else {
 						tr3.clear(StringRef(format("%010d", self->maxKeySpace + 1)));
 						RangeResult res = wait(tr3.getRange(KeySelectorRef(StringRef(myKeyA), onEqualA, offsetA),
 						                                    KeySelectorRef(StringRef(myKeyB), onEqualB, offsetB),
-						                                    randomLimit));
+						                                    randomLimit,
+						                                    Snapshot::False,
+						                                    reverse));
 						wait(tr3.commit());
 					}
 				} catch (Error& e) {
@@ -247,7 +259,9 @@ struct ConflictRangeWorkload : TestWorkload {
 
 					RangeResult res = wait(tr4.getRange(KeySelectorRef(StringRef(myKeyA), onEqualA, offsetA),
 					                                    KeySelectorRef(StringRef(myKeyB), onEqualB, offsetB),
-					                                    randomLimit));
+					                                    randomLimit,
+					                                    Snapshot::False,
+					                                    reverse));
 					++self->withConflicts;
 
 					if (res.size() == originalResults.size()) {
@@ -256,20 +270,27 @@ struct ConflictRangeWorkload : TestWorkload {
 								throw not_committed();
 
 						// Discard known cases where conflicts do not change the results
-						if (originalResults.size() == randomLimit && offsetB <= 0) {
-							// Hit limit but end offset goes backwards, so changes could effect results even though in
-							// this instance they did not
+						if (originalResults.size() == randomLimit &&
+						    ((offsetB <= 0 && !reverse) || (offsetA > 1 && reverse))) {
+							// Hit limit but end offset goes into the range, so changes could effect results even though
+							// in this instance they did not
 							throw not_committed();
 						}
 
-						if (originalResults[originalResults.size() - 1].key >= LiteralStringRef("\xff")) {
+						KeyRef smallestResult = originalResults[0].key;
+						KeyRef largestResult = originalResults[originalResults.size() - 1].key;
+						if (reverse) {
+							std::swap(smallestResult, largestResult);
+						}
+
+						if (largestResult >= sentinelKey) {
 							// Results go into server keyspace, so if a key selector does not fully resolve offset, a
 							// change won't effect results
 							throw not_committed();
 						}
 
-						if ((originalResults[0].key == firstElement ||
-						     originalResults[0].key == StringRef(format("%010d", *(insertedSet.begin())))) &&
+						if ((smallestResult == firstElement ||
+						     smallestResult == StringRef(format("%010d", *(insertedSet.begin())))) &&
 						    offsetA < 0) {
 							// Results return the first element, and the begin offset is negative, so if a key selector
 							// does not fully resolve the offset, a change won't effect results
@@ -303,6 +324,7 @@ struct ConflictRangeWorkload : TestWorkload {
 						    .detail("OffsetA", offsetA)
 						    .detail("OffsetB", offsetB)
 						    .detail("RandomLimit", randomLimit)
+						    .detail("Reverse", reverse)
 						    .detail("Size", originalResults.size())
 						    .detail("Results", keyStr1)
 						    .detail("Original", keyStr2);
@@ -316,19 +338,22 @@ struct ConflictRangeWorkload : TestWorkload {
 							allKeyEntries += printable(res[i].key) + " ";
 						}
 
-						TraceEvent("ConflictRangeDump").detail("Keys", allKeyEntries);
+						TraceEvent("ConflictRangeDump").setMaxFieldLength(10000).detail("Keys", allKeyEntries);
 					}
 					throw not_committed();
 				} else {
 					// If the commit is successful, check that the result matches the first execution.
 					RangeResult res = wait(tr4.getRange(KeySelectorRef(StringRef(myKeyA), onEqualA, offsetA),
 					                                    KeySelectorRef(StringRef(myKeyB), onEqualB, offsetB),
-					                                    randomLimit));
+					                                    randomLimit,
+					                                    Snapshot::False,
+					                                    reverse));
 					++self->withoutConflicts;
 
 					if (res.size() == originalResults.size()) {
 						for (int i = 0; i < res.size(); i++) {
-							if (res[i] != originalResults[i]) {
+							if (res[i] != originalResults[i] &&
+							    !(res[i].key.startsWith("\xff"_sr) && originalResults[i].key.startsWith("\xff"_sr))) {
 								TraceEvent(SevError, "ConflictRangeError")
 								    .detail("Info", "No conflict returned, however results do not match")
 								    .detail("Original",
@@ -360,6 +385,7 @@ struct ConflictRangeWorkload : TestWorkload {
 						    .detail("OffsetA", offsetA)
 						    .detail("OffsetB", offsetB)
 						    .detail("RandomLimit", randomLimit)
+						    .detail("Reverse", reverse)
 						    .detail("Size", originalResults.size())
 						    .detail("Results", keyStr1)
 						    .detail("Original", keyStr2);
@@ -380,4 +406,4 @@ struct ConflictRangeWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<ConflictRangeWorkload> ConflictRangeWorkloadFactory("ConflictRange");
+WorkloadFactory<ConflictRangeWorkload> ConflictRangeWorkloadFactory;

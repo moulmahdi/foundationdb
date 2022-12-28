@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ static void bench_populate(benchmark::State& state) {
 	size_t items = state.range(0);
 	size_t size = state.range(1);
 	auto kv = getKV(size, size);
-	while (state.KeepRunning()) {
+	for (auto _ : state) {
 		Standalone<VectorRef<MutationRef>> mutations;
 		mutations.reserve(mutations.arena(), items);
 		for (int i = 0; i < items; ++i) {

@@ -49,6 +49,17 @@ from bindingtester.known_testers import Tester
 import fdb
 import fdb.tuple
 
+
+API_VERSIONS = [
+    13, 14, 16, 21, 22, 23,
+    100, 200, 300,
+    400, 410, 420, 430, 440, 450, 460,
+    500, 510, 520,
+    600, 610, 620, 630,
+    700, 710, 720,
+]
+
+
 fdb.api_version(FDB_API_VERSION)
 
 
@@ -156,8 +167,7 @@ def choose_api_version(selected_api_version, tester_min_version, tester_max_vers
         elif random.random() < 0.7:
             api_version = min_version
         elif random.random() < 0.9:
-            api_version = random.choice([v for v in [13, 14, 16, 21, 22, 23, 100, 200, 300, 400, 410, 420, 430,
-                                                     440, 450, 460, 500, 510, 520, 600, 610, 620, 630, 700, 710] if v >= min_version and v <= max_version])
+            api_version = random.choice([v for v in API_VERSIONS if v >= min_version and v <= max_version])
         else:
             api_version = random.randint(min_version, max_version)
 
@@ -202,6 +212,7 @@ class TestRunner(object):
         self.args.types = list(reduce(lambda t1, t2: filter(t1.__contains__, t2), map(lambda tester: tester.types, self.testers)))
 
         self.args.no_directory_snapshot_ops = self.args.no_directory_snapshot_ops or any([not tester.directory_snapshot_ops_enabled for tester in self.testers])
+        self.args.no_tenants = self.args.no_tenants or any([not tester.tenants_enabled for tester in self.testers]) or self.args.api_version < 710
 
     def print_test(self):
         test_instructions = self._generate_test()
@@ -282,6 +293,17 @@ class TestRunner(object):
     def _insert_instructions(self, test_instructions):
         util.get_logger().info('\nInserting test into database...')
         del self.db[:]
+
+        while True:
+            tr = self.db.create_transaction()
+            try:
+                tr.options.set_special_key_space_enable_writes()
+                del tr[b'\xff\xff/management/tenant/map/' : b'\xff\xff/management/tenant/map0']
+                tr.commit().wait()
+                break
+            except fdb.FDBError as e:
+                tr.on_error(e).wait()
+
         for subspace, thread in test_instructions.items():
             thread.insert_operations(self.db, subspace)
 
@@ -442,8 +464,10 @@ def parse_args(argv):
     # SOMEDAY: this applies only to the scripted test. Should we invoke test files specifically (as in circus),
     # or invoke them here and allow tests to add arguments?
     parser.add_argument('--no-threads', action='store_true', help='Disables the START_THREAD instruction in the scripted test.')
-    
+
     parser.add_argument('--no-directory-snapshot-ops', action='store_true', help='Disables snapshot operations for directory instructions.')
+
+    parser.add_argument('--no-tenants', action='store_true', help='Disables tenant operations.')
 
     return parser.parse_args(argv)
 

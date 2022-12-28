@@ -6,6 +6,7 @@
 .. |database-type| replace:: ``FDBDatabase``
 .. |database-class| replace:: :type:`FDBDatabase`
 .. |database-auto| replace:: FIXME
+.. |tenant-type| replace:: ``FDBTenant``
 .. |transaction-class| replace:: FIXME
 .. |get-key-func| replace:: :func:`fdb_transaction_get_key()`
 .. |get-range-func| replace:: :func:`fdb_transaction_get_range()`
@@ -133,7 +134,7 @@ API versioning
 
 Prior to including ``fdb_c.h``, you must define the ``FDB_API_VERSION`` macro. This, together with the :func:`fdb_select_api_version()` function, allows programs written against an older version of the API to compile and run with newer versions of the C library. The current version of the FoundationDB C API is |api-version|. ::
 
-  #define FDB_API_VERSION 710
+  #define FDB_API_VERSION 720
   #include <foundationdb/fdb_c.h>
 
 .. function:: fdb_error_t fdb_select_api_version(int version)
@@ -221,7 +222,7 @@ The FoundationDB client library performs most tasks on a singleton thread (which
 Future
 ======
 
-Most functions in the FoundationDB API are asynchronous, meaning that they may return to the caller before actually delivering their result. These functions always return :type:`FDBFuture*`. An :type:`FDBFuture` object represents a result value or error to be delivered at some future time. You can wait for a Future to be "ready" -- to have a value or error delivered -- by setting a callback function, or by blocking a thread, or by polling. Once a Future is ready, you can extract either an error code or a value of the appropriate type (the documentation for the original function will tell you which :func:`fdb_future_get_*()` function you should call).
+Most functions in the FoundationDB API are asynchronous, meaning that they may return to the caller before actually delivering their result. These functions always return ``FDBFuture*``. An :type:`FDBFuture` object represents a result value or error to be delivered at some future time. You can wait for a Future to be "ready" -- to have a value or error delivered -- by setting a callback function, or by blocking a thread, or by polling. Once a Future is ready, you can extract either an error code or a value of the appropriate type (the documentation for the original function will tell you which ``fdb_future_get_()`` function you should call).
 
 To use the API in a synchronous way, you would typically do something like this for each asynchronous call::
 
@@ -281,7 +282,7 @@ See :ref:`developer-guide-programming-with-futures` for further (language-indepe
 
 .. type:: FDBCallback
 
-   A pointer to a function which takes :type:`FDBFuture*` and ``void*`` and returns ``void``.
+   A pointer to a function which takes ``FDBFuture*`` and ``void*`` and returns ``void``.
 
 .. function:: void fdb_future_release_memory(FDBFuture* future)
 
@@ -297,13 +298,13 @@ See :ref:`developer-guide-programming-with-futures` for further (language-indepe
 
 .. function:: fdb_error_t fdb_future_get_int64(FDBFuture* future, int64_t* out)
 
-   Extracts a 64-bit integer from an :type:`FDBFuture*` into a caller-provided variable of type ``int64_t``. |future-warning|
+   Extracts a 64-bit integer from a pointer to :type:`FDBFuture` into a caller-provided variable of type ``int64_t``. |future-warning|
 
    |future-get-return1| |future-get-return2|.
 
 .. function:: fdb_error_t fdb_future_get_key_array( FDBFuture* f, FDBKey const** out_key_array, int* out_count)
 
-   Extracts an array of :type:`FDBKey` from an :type:`FDBFuture*` into a caller-provided variable of type ``FDBKey*``. The size of the array will also be extracted and passed back by a caller-provided variable of type ``int`` |future-warning|
+   Extracts an array of :type:`FDBKey` from an ``FDBFuture*`` into a caller-provided variable of type ``FDBKey*``. The size of the array will also be extracted and passed back by a caller-provided variable of type ``int`` |future-warning|
 
    |future-get-return1| |future-get-return2|.
 
@@ -419,9 +420,20 @@ An |database-blurb1| Modifications to a database are performed via transactions.
 
    |option-doc|
 
+.. function:: fdb_error_t fdb_database_open_tenant(FDBDatabase* database, uint8_t const* tenant_name, int tenant_name_length, FDBTenant** out_tenant)
+
+   Opens a tenant on the given database. All transactions created by this tenant will operate on the tenant's key-space. The caller assumes ownership of the :type:`FDBTenant` object and must destroy it with :func:`fdb_tenant_destroy()`.
+
+   ``tenant_name``
+      The name of the tenant being accessed, as a byte string.
+   ``tenant_name_length``
+      The length of the tenant name byte string.
+   ``*out_tenant``
+      Set to point to the newly created :type:`FDBTenant`.
+
 .. function:: fdb_error_t fdb_database_create_transaction(FDBDatabase* database, FDBTransaction** out_transaction)
 
-   Creates a new transaction on the given database. The caller assumes ownership of the :type:`FDBTransaction` object and must destroy it with :func:`fdb_transaction_destroy()`.
+   Creates a new transaction on the given database without using a tenant, meaning that it will operate on the entire database key-space. The caller assumes ownership of the :type:`FDBTransaction` object and must destroy it with :func:`fdb_transaction_destroy()`.
 
    ``*out_transaction``
       Set to point to the newly created :type:`FDBTransaction`.
@@ -454,7 +466,7 @@ An |database-blurb1| Modifications to a database are performed via transactions.
    
    The function will change the region configuration to have a positive priority for the chosen dcId, and a negative priority for all other dcIds.
 
-   In particular, no error will be thrown if the given dcId does not exist. It will just not attemp to force a recovery.
+   In particular, no error will be thrown if the given dcId does not exist. It will just not attempt to force a recovery.
    
    If the database has already recovered, the function does nothing. Thus it's safe to call it multiple times.
 
@@ -486,6 +498,26 @@ An |database-blurb1| Modifications to a database are performed via transactions.
 
    Returns a value where 0 indicates that the client is idle and 1 (or larger) indicates that the client is saturated. By default, this value is updated every second.
 
+Tenant
+======
+
+|tenant-blurb1|
+
+.. type:: FDBTenant
+
+   An opaque type that represents a tenant in the FoundationDB C API.
+
+.. function:: void fdb_tenant_destroy(FDBTenant* tenant)
+
+   Destroys an :type:`FDBTenant` object. It must be called exactly once for each successful call to :func:`fdb_database_create_tenant()`. This function only destroys a handle to the tenant -- the tenant and its data will be fine!
+
+.. function:: fdb_error_t fdb_tenant_create_transaction(FDBTenant* tenant, FDBTronsaction **out_transaction)
+
+   Creates a new transaction on the given tenant. This transaction will operate within the tenant's key-space and cannot access data outside the tenant. The caller assumes ownership of the :type:`FDBTransaction` object and must destroy it with :func:`fdb_transaction_destroy()`.
+
+   ``*out_transaction``
+      Set to point to the newly created :type:`FDBTransaction`.
+
 Transaction
 ===========
 
@@ -515,13 +547,13 @@ Applications must provide error handling and an appropriate retry loop around th
 
 .. function:: void fdb_transaction_set_read_version(FDBTransaction* transaction, int64_t version)
 
-   Sets the snapshot read version used by a transaction. This is not needed in simple cases. If the given version is too old, subsequent reads will fail with error_code_transaction_too_old; if it is too new, subsequent reads may be delayed indefinitely and/or fail with error_code_future_version. If any of :func:`fdb_transaction_get_*()` have been called on this transaction already, the result is undefined.
+   Sets the snapshot read version used by a transaction. This is not needed in simple cases. If the given version is too old, subsequent reads will fail with error_code_transaction_too_old; if it is too new, subsequent reads may be delayed indefinitely and/or fail with error_code_future_version. If any of ``fdb_transaction_get_*()`` have been called on this transaction already, the result is undefined.
 
 .. function:: FDBFuture* fdb_transaction_get_read_version(FDBTransaction* transaction)
 
    |future-return0| the transaction snapshot read version. |future-return1| call :func:`fdb_future_get_int64()` to extract the version into an int64_t that you provide, |future-return2|
 
-   The transaction obtains a snapshot read version automatically at the time of the first call to :func:`fdb_transaction_get_*()` (including this one) and (unless causal consistency has been deliberately compromised by transaction options) is guaranteed to represent all transactions which were reported committed before that call.
+   The transaction obtains a snapshot read version automatically at the time of the first call to ``fdb_transaction_get_*()`` (including this one) and (unless causal consistency has been deliberately compromised by transaction options) is guaranteed to represent all transactions which were reported committed before that call.
 
 .. function:: FDBFuture* fdb_transaction_get(FDBTransaction* transaction, uint8_t const* key_name, int key_name_length, fdb_bool_t snapshot)
 
@@ -797,7 +829,7 @@ Applications must provide error handling and an appropriate retry loop around th
 
    |future-returnvoid|
 
-   Callers will usually want to retry a transaction if the commit or a prior :func:`fdb_transaction_get_*()` returns a retryable error (see :func:`fdb_transaction_on_error()`).
+   Callers will usually want to retry a transaction if the commit or a prior ``fdb_transaction_get_*()`` returns a retryable error (see :func:`fdb_transaction_on_error()`).
 
    |commit-unknown-result-blurb|
 
@@ -846,9 +878,9 @@ Applications must provide error handling and an appropriate retry loop around th
 
 .. function:: FDBFuture* fdb_transaction_on_error(FDBTransaction* transaction, fdb_error_t error)
 
-   Implements the recommended retry and backoff behavior for a transaction. This function knows which of the error codes generated by other :func:`fdb_transaction_*()` functions represent temporary error conditions and which represent application errors that should be handled by the application. It also implements an exponential backoff strategy to avoid swamping the database cluster with excessive retries when there is a high level of conflict between transactions.
+   Implements the recommended retry and backoff behavior for a transaction. This function knows which of the error codes generated by other ``fdb_transaction_*()`` functions represent temporary error conditions and which represent application errors that should be handled by the application. It also implements an exponential backoff strategy to avoid swamping the database cluster with excessive retries when there is a high level of conflict between transactions.
 
-   On receiving any type of error from an :func:`fdb_transaction_*()` function, the application should:
+   On receiving any type of error from an ``fdb_transaction_*()`` function, the application should:
 
    1. Call :func:`fdb_transaction_on_error()` with the returned :type:`fdb_error_t` code.
 
@@ -931,15 +963,15 @@ Key selectors
 
 In the FoundationDB C API, key selectors are not represented by a structure of any kind, but are instead expressed as sequential parameters to |get-key-func| and |get-range-func|. For convenience, the most common key selectors are available as C macros that expand to the appropriate parameters.
 
-.. function:: FDB_KEYSEL_LAST_LESS_THAN(key_name, key_name_length)
+.. type:: FDB_KEYSEL_LAST_LESS_THAN(key_name, key_name_length)
 
-.. function:: FDB_KEYSEL_LAST_LESS_OR_EQUAL(key_name, key_name_length)
+.. type:: FDB_KEYSEL_LAST_LESS_OR_EQUAL(key_name, key_name_length)
 
-.. function:: FDB_KEYSEL_FIRST_GREATER_THAN(key_name, key_name_length)
+.. type:: FDB_KEYSEL_FIRST_GREATER_THAN(key_name, key_name_length)
 
-.. function:: FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(key_name, key_name_length)
+.. type:: FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(key_name, key_name_length)
 
-To use one of these macros, simply replace the four parameters in the function with one of :func:`FDB_KEYSEL_*`::
+To use one of these macros, simply replace the four parameters in the function with one of ``FDB_KEYSEL_*``::
 
     future = fdb_transaction_get_key(transaction, "key", 3, 0, 2, 0);
 

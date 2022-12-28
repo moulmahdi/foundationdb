@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,14 +18,16 @@
  * limitations under the License.
  */
 
+#include "fmt/format.h"
 #include "fdbserver/NetworkTest.h"
 #include "flow/Knobs.h"
-#include "flow/actorcompiler.h" // This must be the last #include.
 #include "flow/ActorCollection.h"
 #include "flow/UnitTest.h"
 #include <inttypes.h>
 
-UID WLTOKEN_NETWORKTEST(-1, 2);
+#include "flow/actorcompiler.h" // This must be the last #include.
+
+constexpr int WLTOKEN_NETWORKTEST = WLTOKEN_FIRST_AVAILABLE;
 
 struct LatencyStats {
 	using sample = double;
@@ -55,7 +57,8 @@ struct LatencyStats {
 	double stddev() { return sqrt(x2 / n - (x / n) * (x / n)); }
 };
 
-NetworkTestInterface::NetworkTestInterface(NetworkAddress remote) : test(Endpoint({ remote }, WLTOKEN_NETWORKTEST)) {}
+NetworkTestInterface::NetworkTestInterface(NetworkAddress remote)
+  : test(Endpoint::wellKnown({ remote }, WLTOKEN_NETWORKTEST)) {}
 
 NetworkTestInterface::NetworkTestInterface(INetwork* local) {
 	test.makeWellKnownEndpoint(WLTOKEN_NETWORKTEST, TaskPriority::DefaultEndpoint);
@@ -93,8 +96,8 @@ ACTOR Future<Void> networkTestServer() {
 }
 
 ACTOR Future<Void> networkTestStreamingServer() {
-	state NetworkTestInterface interf( g_network );
-	state Future<Void> logging = delay( 1.0 );
+	state NetworkTestInterface interf(g_network);
+	state Future<Void> logging = delay(1.0);
 	state double lastTime = now();
 	state int sent = 0;
 	state LatencyStats latency;
@@ -113,7 +116,7 @@ ACTOR Future<Void> networkTestStreamingServer() {
 					latency.tock(sample);
 					sent++;
 				}
-				when( wait( logging ) ) {
+				when(wait(logging)) {
 					auto spd = sent / (now() - lastTime);
 					if (FLOW_KNOBS->NETWORK_TEST_SCRIPT_MODE) {
 						fprintf(stderr, "%f\t%.3f\t%.3f\n", spd, latency.mean() * 1e6, latency.stddev() * 1e6);
@@ -123,11 +126,11 @@ ACTOR Future<Void> networkTestStreamingServer() {
 					latency.reset();
 					lastTime = now();
 					sent = 0;
-					logging = delay( 1.0 );
+					logging = delay(1.0);
 				}
 			}
-		} catch (Error &e) {
-			if(e.code() != error_code_operation_obsolete) {
+		} catch (Error& e) {
+			if (e.code() != error_code_operation_obsolete) {
 				throw e;
 			}
 		}
@@ -170,8 +173,10 @@ ACTOR Future<Void> testClient(std::vector<NetworkTestInterface> interfs,
 	return Void();
 }
 
-ACTOR Future<Void> testClientStream(std::vector<NetworkTestInterface> interfs, int* sent, int* completed,
-                              LatencyStats* latency) {
+ACTOR Future<Void> testClientStream(std::vector<NetworkTestInterface> interfs,
+                                    int* sent,
+                                    int* completed,
+                                    LatencyStats* latency) {
 	state std::string request_payload(FLOW_KNOBS->NETWORK_TEST_REQUEST_SIZE, '.');
 	state LatencyStats::sample sample;
 
@@ -188,7 +193,8 @@ ACTOR Future<Void> testClientStream(std::vector<NetworkTestInterface> interfs, i
 				ASSERT(rep.index == j++);
 			}
 		} catch (Error& e) {
-			ASSERT(e.code() == error_code_end_of_stream || e.code() == error_code_connection_failed);
+			ASSERT(e.code() == error_code_end_of_stream || e.code() == error_code_connection_failed ||
+			       e.code() == error_code_request_maybe_delivered);
 		}
 		latency->tock(sample);
 		(*completed)++;
@@ -535,8 +541,8 @@ struct P2PNetworkTest {
 		} catch (Error& e) {
 			++self->sessionErrors;
 			TraceEvent(SevError, incoming ? "P2PIncomingSessionError" : "P2POutgoingSessionError")
-			    .detail("Remote", conn->getPeerAddress())
-			    .error(e);
+			    .error(e)
+			    .detail("Remote", conn->getPeerAddress());
 		}
 
 		return Void();
@@ -553,7 +559,7 @@ struct P2PNetworkTest {
 				wait(doSession(self, conn, false));
 			} catch (Error& e) {
 				++self->connectErrors;
-				TraceEvent(SevError, "P2POutgoingError").detail("Remote", remote).error(e);
+				TraceEvent(SevError, "P2POutgoingError").error(e).detail("Remote", remote);
 				wait(delay(1));
 			}
 		}
@@ -571,7 +577,7 @@ struct P2PNetworkTest {
 				sessions.add(doSession(self, conn, true));
 			} catch (Error& e) {
 				++self->acceptErrors;
-				TraceEvent(SevError, "P2PIncomingError").detail("Listener", listener->getListenAddress()).error(e);
+				TraceEvent(SevError, "P2PIncomingError").error(e).detail("Listener", listener->getListenAddress());
 			}
 		}
 	}
@@ -581,10 +587,10 @@ struct P2PNetworkTest {
 
 		self->startTime = now();
 
-		printf("%d listeners, %d remotes, %d outgoing connections\n",
-		       self->listeners.size(),
-		       self->remotes.size(),
-		       self->connectionsOut);
+		fmt::print("{0} listeners, {1} remotes, {2} outgoing connections\n",
+		           self->listeners.size(),
+		           self->remotes.size(),
+		           self->connectionsOut);
 
 		for (auto n : self->remotes) {
 			printf("Remote: %s\n", n.toString().c_str());

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "flow/DeterministicRandom.h"
@@ -28,17 +27,16 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct MemoryLifetime : KVWorkload {
+	static constexpr auto NAME = "MemoryLifetime";
 	double testDuration;
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 
 	std::string valueString;
 
 	MemoryLifetime(WorkloadContext const& wcx) : KVWorkload(wcx) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 60.0);
+		testDuration = getOption(options, "testDuration"_sr, 60.0);
 		valueString = std::string(maxValueBytes, '.');
 	}
-
-	std::string description() const override { return "MemoryLifetime"; }
 
 	Value randomValue() const {
 		return StringRef((uint8_t*)valueString.c_str(),
@@ -59,7 +57,7 @@ struct MemoryLifetime : KVWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR Future<Void> _setup(Database cx, MemoryLifetime* self) {
 		state Promise<double> loadTime;
@@ -170,4 +168,4 @@ struct MemoryLifetime : KVWorkload {
 	}
 };
 
-WorkloadFactory<MemoryLifetime> MemoryLifetimeWorkloadFactory("MemoryLifetime");
+WorkloadFactory<MemoryLifetime> MemoryLifetimeWorkloadFactory;

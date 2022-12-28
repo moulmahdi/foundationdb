@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,16 +20,16 @@
 
 #include <cinttypes>
 
+#include "fmt/format.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/SignalSafeUnwind.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 // Stress test the slow task profiler or flow profiler
 struct SlowTaskWorkload : TestWorkload {
+	static constexpr auto NAME = "SlowTaskWorkload";
 
 	SlowTaskWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {}
-
-	std::string description() const override { return "SlowTaskWorkload"; }
 
 	Future<Void> start(Database const& cx) override {
 		setupRunLoopProfiler();
@@ -38,7 +38,7 @@ struct SlowTaskWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<Void> go() {
 		wait(delay(1));
@@ -55,14 +55,14 @@ struct SlowTaskWorkload : TestWorkload {
 				do_slow_exception_thing(&exc);
 			}
 		}
-		fprintf(stderr,
-		        "Slow task complete: %" PRId64 " exceptions; %" PRId64 " calls to dl_iterate_phdr, %" PRId64
-		        " profiles deferred, %" PRId64 " profiles overflowed, %" PRId64 " profiles captured\n",
-		        exc,
-		        dl_iterate_phdr_calls - phc,
-		        getNumProfilesDeferred() - startProfilesDeferred,
-		        getNumProfilesOverflowed() - startProfilesOverflowed,
-		        getNumProfilesCaptured() - startProfilesCaptured);
+		fmt::print(stderr,
+		           "Slow task complete: {0} exceptions; {1} calls to dl_iterate_phdr, {2}"
+		           " profiles deferred, {3} profiles overflowed, {4} profiles captured\n",
+		           exc,
+		           dl_iterate_phdr_calls - phc,
+		           getNumProfilesDeferred() - startProfilesDeferred,
+		           getNumProfilesOverflowed() - startProfilesOverflowed,
+		           getNumProfilesCaptured() - startProfilesCaptured);
 
 		return Void();
 	}
@@ -78,4 +78,4 @@ struct SlowTaskWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<SlowTaskWorkload> SlowTaskWorkloadFactory("SlowTaskWorkload");
+WorkloadFactory<SlowTaskWorkload> SlowTaskWorkloadFactory;

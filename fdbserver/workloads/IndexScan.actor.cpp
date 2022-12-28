@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
@@ -27,6 +26,7 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct IndexScanWorkload : KVWorkload {
+	constexpr static auto NAME = "IndexScan";
 	uint64_t rowsRead, chunks;
 	int bytesPerRead, failedTransactions, scans;
 	double totalTimeFetching, testDuration, transactionDuration;
@@ -34,14 +34,12 @@ struct IndexScanWorkload : KVWorkload {
 
 	IndexScanWorkload(WorkloadContext const& wcx)
 	  : KVWorkload(wcx), rowsRead(0), chunks(0), failedTransactions(0), scans(0) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		bytesPerRead = getOption(options, LiteralStringRef("bytesPerRead"), 80000);
-		transactionDuration = getOption(options, LiteralStringRef("transactionDuration"), 1.0);
-		singleProcess = getOption(options, LiteralStringRef("singleProcess"), true);
-		readYourWrites = getOption(options, LiteralStringRef("readYourWrites"), true);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		bytesPerRead = getOption(options, "bytesPerRead"_sr, 80000);
+		transactionDuration = getOption(options, "transactionDuration"_sr, 1.0);
+		singleProcess = getOption(options, "singleProcess"_sr, true);
+		readYourWrites = getOption(options, "readYourWrites"_sr, true);
 	}
-
-	std::string description() const override { return "SimpleRead"; }
 
 	Future<Void> setup(Database const& cx) override {
 		// this will be set up by and external force!
@@ -57,17 +55,17 @@ struct IndexScanWorkload : KVWorkload {
 
 	Future<bool> check(const Database&) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (singleProcess && clientId != 0)
 			return;
 
-		m.push_back(PerfMetric("FailedTransactions", failedTransactions, false));
-		m.push_back(PerfMetric("RowsRead", rowsRead, false));
-		m.push_back(PerfMetric("Scans", scans, false));
-		m.push_back(PerfMetric("Chunks", chunks, false));
-		m.push_back(PerfMetric("TimeFetching", totalTimeFetching, true));
-		m.push_back(PerfMetric("Rows/sec", totalTimeFetching == 0 ? 0 : rowsRead / totalTimeFetching, true));
-		m.push_back(PerfMetric("Rows/chunk", chunks == 0 ? 0 : rowsRead / (double)chunks, true));
+		m.emplace_back("FailedTransactions", failedTransactions, Averaged::False);
+		m.emplace_back("RowsRead", rowsRead, Averaged::False);
+		m.emplace_back("Scans", scans, Averaged::False);
+		m.emplace_back("Chunks", chunks, Averaged::False);
+		m.emplace_back("TimeFetching", totalTimeFetching, Averaged::True);
+		m.emplace_back("Rows/sec", totalTimeFetching == 0 ? 0 : rowsRead / totalTimeFetching, Averaged::True);
+		m.emplace_back("Rows/chunk", chunks == 0 ? 0 : rowsRead / (double)chunks, Averaged::True);
 	}
 
 	ACTOR Future<Void> _start(Database cx, IndexScanWorkload* self) {
@@ -76,7 +74,7 @@ struct IndexScanWorkload : KVWorkload {
 		loop {
 			state Transaction tr(cx);
 			try {
-				wait(tr.warmRange(cx, allKeys));
+				wait(tr.warmRange(allKeys));
 				break;
 			} catch (Error& e) {
 				wait(tr.onError(e));
@@ -93,7 +91,9 @@ struct IndexScanWorkload : KVWorkload {
 	ACTOR static Future<Void> serialScans(Database cx, IndexScanWorkload* self) {
 		state double start = now();
 		try {
-			loop { wait(scanDatabase(cx, self)); }
+			loop {
+				wait(scanDatabase(cx, self));
+			}
 		} catch (...) {
 			self->totalTimeFetching = now() - start;
 			throw;
@@ -144,4 +144,4 @@ struct IndexScanWorkload : KVWorkload {
 	}
 };
 
-WorkloadFactory<IndexScanWorkload> IndexScanWorkloadFactory("IndexScan");
+WorkloadFactory<IndexScanWorkload> IndexScanWorkloadFactory;

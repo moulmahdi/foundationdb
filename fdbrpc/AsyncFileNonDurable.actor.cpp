@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@
 std::map<std::string, Future<Void>> AsyncFileNonDurable::filesBeingDeleted;
 
 ACTOR Future<Void> sendOnProcess(ISimulator::ProcessInfo* process, Promise<Void> promise, TaskPriority taskID) {
-	wait(g_simulator.onProcess(process, taskID));
+	wait(g_simulator->onProcess(process, taskID));
 	promise.send(Void());
 	return Void();
 }
@@ -33,7 +33,7 @@ ACTOR Future<Void> sendErrorOnProcess(ISimulator::ProcessInfo* process,
                                       Promise<Void> promise,
                                       Error e,
                                       TaskPriority taskID) {
-	wait(g_simulator.onProcess(process, taskID));
+	wait(g_simulator->onProcess(process, taskID));
 	promise.sendError(e);
 	return Void();
 }

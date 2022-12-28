@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,27 +22,30 @@
 #include "boost/lexical_cast.hpp"
 
 #include "flow/IRandom.h"
-#include "flow/Tracing.h"
+#include "fdbclient/Tracing.h"
 #include "fdbclient/NativeAPI.actor.h"
+#include "fdbclient/FDBTypes.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
-#include "fdbrpc/IRateControl.h"
+#include "flow/IRateControl.h"
 #include "fdbrpc/simulator.h"
 #include "fdbserver/Knobs.h"
-#include "fdbserver/StorageMetrics.h"
+#include "fdbserver/StorageMetrics.actor.h"
 #include "fdbserver/DataDistribution.actor.h"
 #include "fdbserver/QuietDatabase.h"
 #include "fdbserver/TSSMappingUtil.actor.h"
 #include "flow/DeterministicRandom.h"
 #include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/StorageServerInterface.h"
-#include "flow/actorcompiler.h" // This must be the last #include.
 #include "flow/network.h"
 
-//#define SevCCheckInfo SevVerbose
+#include "flow/actorcompiler.h" // This must be the last #include.
+
+// #define SevCCheckInfo SevVerbose
 #define SevCCheckInfo SevInfo
 
 struct ConsistencyCheckWorkload : TestWorkload {
+	static constexpr auto NAME = "ConsistencyCheck";
 	// Whether or not we should perform checks that will only pass if the database is in a quiescent state
 	bool performQuiescentChecks;
 
@@ -96,16 +99,16 @@ struct ConsistencyCheckWorkload : TestWorkload {
 	Future<Void> monitorConsistencyCheckSettingsActor;
 
 	ConsistencyCheckWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		performQuiescentChecks = getOption(options, LiteralStringRef("performQuiescentChecks"), false);
-		performCacheCheck = getOption(options, LiteralStringRef("performCacheCheck"), false);
-		performTSSCheck = getOption(options, LiteralStringRef("performTSSCheck"), true);
-		quiescentWaitTimeout = getOption(options, LiteralStringRef("quiescentWaitTimeout"), 600.0);
-		distributed = getOption(options, LiteralStringRef("distributed"), true);
-		shardSampleFactor = std::max(getOption(options, LiteralStringRef("shardSampleFactor"), 1), 1);
-		failureIsError = getOption(options, LiteralStringRef("failureIsError"), false);
-		rateLimitMax = getOption(options, LiteralStringRef("rateLimitMax"), 0);
-		shuffleShards = getOption(options, LiteralStringRef("shuffleShards"), false);
-		indefinite = getOption(options, LiteralStringRef("indefinite"), false);
+		performQuiescentChecks = getOption(options, "performQuiescentChecks"_sr, false);
+		performCacheCheck = getOption(options, "performCacheCheck"_sr, false);
+		performTSSCheck = getOption(options, "performTSSCheck"_sr, true);
+		quiescentWaitTimeout = getOption(options, "quiescentWaitTimeout"_sr, 600.0);
+		distributed = getOption(options, "distributed"_sr, true);
+		shardSampleFactor = std::max(getOption(options, "shardSampleFactor"_sr, 1), 1);
+		failureIsError = getOption(options, "failureIsError"_sr, false);
+		rateLimitMax = getOption(options, "rateLimitMax"_sr, 0);
+		shuffleShards = getOption(options, "shuffleShards"_sr, false);
+		indefinite = getOption(options, "indefinite"_sr, false);
 		suspendConsistencyCheck.set(true);
 
 		success = true;
@@ -115,8 +118,6 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		repetitions = 0;
 		bytesReadInPreviousRound = 0;
 	}
-
-	std::string description() const override { return "ConsistencyCheck"; }
 
 	Future<Void> setup(Database const& cx) override { return _setup(cx, this); }
 
@@ -130,6 +131,10 @@ struct ConsistencyCheckWorkload : TestWorkload {
 			try {
 				wait(timeoutError(quietDatabase(cx, self->dbInfo, "ConsistencyCheckStart", 0, 1e5, 0, 0),
 				                  self->quiescentWaitTimeout)); // FIXME: should be zero?
+				if (g_network->isSimulated()) {
+					g_simulator->quiesced = true;
+					TraceEvent("ConsistencyCheckQuiesced").detail("Quiesced", g_simulator->quiesced);
+				}
 			} catch (Error& e) {
 				TraceEvent("ConsistencyCheck_QuietDatabaseError").error(e);
 				self->testFailure("Unable to achieve a quiet database");
@@ -148,7 +153,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return success; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	void testFailure(std::string message, bool isError = false) {
 		success = false;
@@ -200,12 +205,16 @@ struct ConsistencyCheckWorkload : TestWorkload {
 				when(wait(self->suspendConsistencyCheck.onChange())) {}
 			}
 		}
+		if (self->firstClient && g_network->isSimulated() && self->performQuiescentChecks) {
+			g_simulator->quiesced = false;
+			TraceEvent("ConsistencyCheckQuiescedEnd").detail("Quiesced", g_simulator->quiesced);
+		}
 		return Void();
 	}
 
 	ACTOR Future<Void> runCheck(Database cx, ConsistencyCheckWorkload* self) {
-		TEST(self->performQuiescentChecks); // Quiescent consistency check
-		TEST(!self->performQuiescentChecks); // Non-quiescent consistency check
+		CODE_PROBE(self->performQuiescentChecks, "Quiescent consistency check");
+		CODE_PROBE(!self->performQuiescentChecks, "Non-quiescent consistency check");
 
 		if (self->firstClient || self->distributed) {
 			try {
@@ -272,7 +281,8 @@ struct ConsistencyCheckWorkload : TestWorkload {
 
 					// Check that nothing is in the storage server queues
 					try {
-						int64_t maxStorageServerQueueSize = wait(getMaxStorageServerQueueSize(cx, self->dbInfo));
+						int64_t maxStorageServerQueueSize =
+						    wait(getMaxStorageServerQueueSize(cx, self->dbInfo, invalidVersion));
 						if (maxStorageServerQueueSize > 0) {
 							TraceEvent("ConsistencyCheck_ExceedStorageServerQueueLimit")
 							    .detail("MaxQueueSize", maxStorageServerQueueSize);
@@ -295,6 +305,13 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					wait(::success(self->checkForStorage(cx, configuration, tssMapping, self)));
 					wait(::success(self->checkForExtraDataStores(cx, self)));
 
+					// Check blob workers are operating as expected
+					if (configuration.blobGranulesEnabled) {
+						bool blobWorkersCorrect = wait(self->checkBlobWorkers(cx, configuration, self));
+						if (!blobWorkersCorrect)
+							self->testFailure("Blob workers incorrect");
+					}
+
 					// Check that each machine is operating as its desired class
 					bool usingDesiredClasses = wait(self->checkUsingDesiredClasses(cx, self));
 					if (!usingDesiredClasses)
@@ -311,19 +328,41 @@ struct ConsistencyCheckWorkload : TestWorkload {
 
 				// Get a list of key servers; verify that the TLogs and master all agree about who the key servers are
 				state Promise<std::vector<std::pair<KeyRange, std::vector<StorageServerInterface>>>> keyServerPromise;
-				bool keyServerResult = wait(self->getKeyServers(cx, self, keyServerPromise, keyServersKeys));
+				bool keyServerResult =
+				    wait(getKeyServers(cx, keyServerPromise, keyServersKeys, self->performQuiescentChecks));
 				if (keyServerResult) {
-					state std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> keyServers =
+					state std::vector<std::pair<KeyRange, std::vector<StorageServerInterface>>> keyServers =
 					    keyServerPromise.getFuture().get();
 
 					// Get the locations of all the shards in the database
 					state Promise<Standalone<VectorRef<KeyValueRef>>> keyLocationPromise;
-					bool keyLocationResult = wait(self->getKeyLocations(cx, keyServers, self, keyLocationPromise));
+					bool keyLocationResult =
+					    wait(getKeyLocations(cx, keyServers, keyLocationPromise, self->performQuiescentChecks));
 					if (keyLocationResult) {
 						state Standalone<VectorRef<KeyValueRef>> keyLocations = keyLocationPromise.getFuture().get();
 
 						// Check that each shard has the same data on all storage servers that it resides on
-						wait(::success(self->checkDataConsistency(cx, keyLocations, configuration, tssMapping, self)));
+						wait(::success(
+						    checkDataConsistency(cx,
+						                         keyLocations,
+						                         configuration,
+						                         tssMapping,
+						                         self->performQuiescentChecks,
+						                         self->performTSSCheck,
+						                         self->firstClient,
+						                         self->failureIsError,
+						                         self->clientId,
+						                         self->clientCount,
+						                         self->distributed,
+						                         self->shuffleShards,
+						                         self->shardSampleFactor,
+						                         self->sharedRandomNumber,
+						                         self->repetitions,
+						                         &(self->bytesReadInPreviousRound),
+						                         true,
+						                         self->rateLimitMax,
+						                         CLIENT_KNOBS->CONSISTENCY_CHECK_ONE_ROUND_TARGET_COMPLETION_TIME,
+						                         KeyRef())));
 
 						// Cache consistency check
 						if (self->performCacheCheck)
@@ -333,11 +372,12 @@ struct ConsistencyCheckWorkload : TestWorkload {
 			} catch (Error& e) {
 				if (e.code() == error_code_transaction_too_old || e.code() == error_code_future_version ||
 				    e.code() == error_code_wrong_shard_server || e.code() == error_code_all_alternatives_failed ||
-				    e.code() == error_code_process_behind)
+				    e.code() == error_code_process_behind || e.code() == error_code_actor_cancelled) {
 					TraceEvent("ConsistencyCheck_Retry")
 					    .error(e); // FIXME: consistency check does not retry in this case
-				else
+				} else {
 					self->testFailure(format("Error %d - %s", e.code(), e.name()));
+				}
 			}
 		}
 
@@ -362,6 +402,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		state Standalone<VectorRef<KeyValueRef>>
 		    serverList; // "\xff/serverList/[[serverID]]" := "[[StorageServerInterface]]"
 		state Standalone<VectorRef<KeyValueRef>> serverTag; // "\xff/serverTag/[[serverID]]" = "[[Tag]]"
+		state bool testResult = true;
 
 		std::vector<Future<bool>> cacheResultsPromise;
 		cacheResultsPromise.push_back(self->fetchKeyValuesFromSS(cx, self, storageCacheKeys, cacheKeyPromise, true));
@@ -423,9 +464,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 			if (serverIndices.size()) {
 				KeyRangeRef range(cacheKey[k].key, (k < cacheKey.size() - 1) ? cacheKey[k + 1].key : allKeys.end);
 				cachedKeysLocationMap.insert(range, cacheServerInterfaces);
-				TraceEvent(SevDebug, "CheckCacheConsistency")
-				    .detail("CachedRange", range.toString())
-				    .detail("Index", k);
+				TraceEvent(SevDebug, "CheckCacheConsistency").detail("CachedRange", range).detail("Index", k);
 			}
 		}
 		// Second, insert corresponding storage servers into the list
@@ -518,7 +557,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					lastSampleKey = lastStartSampleKey;
 
 					// Get the min version of the storage servers
-					Version version = wait(self->getVersion(cx, self));
+					Version version = wait(getVersion(cx));
 
 					state GetKeyValuesRequest req;
 					req.begin = begin;
@@ -527,19 +566,24 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					req.limitBytes = CLIENT_KNOBS->REPLY_BYTE_LIMIT;
 					req.version = version;
 					req.tags = TagSet();
+					req.options = ReadOptions(debugRandom()->randomUniqueID());
+					DisabledTraceEvent("CCD", req.options.get().debugID.get()).detail("Version", version);
 
 					// Try getting the entries in the specified range
-					state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
+					state std::vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
 					state int j = 0;
 					for (j = 0; j < iter_ss.size(); j++) {
 						resetReply(req);
+						if (SERVER_KNOBS->ENABLE_VERSION_VECTOR) {
+							cx->getLatestCommitVersion(iter_ss[j], req.version, req.ssLatestCommitVersions);
+						}
 						keyValueFutures.push_back(iter_ss[j].getKeyValues.getReplyUnlessFailedFor(req, 2, 0));
 					}
 
 					wait(waitForAll(keyValueFutures));
 					TraceEvent(SevDebug, "CheckCacheConsistencyComparison")
-					    .detail("Begin", req.begin.toString())
-					    .detail("End", req.end.toString())
+					    .detail("Begin", req.begin)
+					    .detail("End", req.end)
 					    .detail("SSInterfaces", describe(iter_ss));
 
 					// Read the resulting entries
@@ -548,7 +592,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					for (j = 0; j < keyValueFutures.size(); j++) {
 						ErrorOr<GetKeyValuesReply> rangeResult = keyValueFutures[j].get();
 						// if (rangeResult.isError()) {
-						// 	throw rangeResult.getError();
+						//	throw rangeResult.getError();
 						// }
 
 						// Compare the results with other storage servers
@@ -676,7 +720,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 									    .detail("MatchingKVPairs", matchingKVPairs);
 
 									self->testFailure("Data inconsistent", true);
-									return false;
+									testResult = false;
 								}
 							}
 						}
@@ -705,7 +749,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 						begin = firstGreaterThan(result[result.size() - 1].key);
 						ASSERT(begin.getKey() != allKeys.end);
 						lastStartSampleKey = lastSampleKey;
-						TraceEvent(SevDebug, "CacheConsistencyCheckNextBeginKey").detail("Key", begin.toString());
+						TraceEvent(SevDebug, "CacheConsistencyCheckNextBeginKey").detail("Key", begin);
 					} else
 						break;
 				} catch (Error& e) {
@@ -722,7 +766,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 				    .detail("BytesRead", bytesReadInRange);
 			}
 		}
-		return true;
+		return testResult;
 	}
 
 	// Directly fetch key/values from storage servers through GetKeyValuesRequest
@@ -736,10 +780,10 @@ struct ConsistencyCheckWorkload : TestWorkload {
 	                                        bool removePrefix) {
 		// get shards paired with corresponding storage servers
 		state Promise<std::vector<std::pair<KeyRange, std::vector<StorageServerInterface>>>> keyServerPromise;
-		bool keyServerResult = wait(self->getKeyServers(cx, self, keyServerPromise, range));
+		bool keyServerResult = wait(getKeyServers(cx, keyServerPromise, range, self->performQuiescentChecks));
 		if (!keyServerResult)
 			return false;
-		state std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> shards =
+		state std::vector<std::pair<KeyRange, std::vector<StorageServerInterface>>> shards =
 		    keyServerPromise.getFuture().get();
 
 		// key/value pairs in the given range
@@ -754,7 +798,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		for (i = 0; i < shards.size(); i++) {
 			while (beginKey < std::min<KeyRef>(shards[i].first.end, endKey)) {
 				try {
-					Version version = wait(self->getVersion(cx, self));
+					Version version = wait(getVersion(cx));
 
 					GetKeyValuesRequest req;
 					req.begin = firstGreaterOrEqual(beginKey);
@@ -767,9 +811,12 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					// Fetch key/values from storage servers
 					// Here we read from all storage servers and make sure results are consistent
 					// Note: this maybe duplicate but to make sure all storage servers available in a quiescent database
-					state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
+					state std::vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
 					for (const auto& kv : shards[i].second) {
 						resetReply(req);
+						if (SERVER_KNOBS->ENABLE_VERSION_VECTOR) {
+							cx->getLatestCommitVersion(kv, req.version, req.ssLatestCommitVersions);
+						}
 						keyValueFutures.push_back(kv.getKeyValues.getReplyUnlessFailedFor(req, 2, 0));
 					}
 
@@ -838,870 +885,10 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		return true;
 	}
 
-	// Gets a version at which to read from the storage servers
-	ACTOR Future<Version> getVersion(Database cx, ConsistencyCheckWorkload* self) {
-		loop {
-			state Transaction tr(cx);
-			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
-			try {
-				Version version = wait(tr.getReadVersion());
-				return version;
-			} catch (Error& e) {
-				wait(tr.onError(e));
-			}
-		}
-	}
-
-	// Get a list of storage servers(persisting keys within range "kr") from the master and compares them with the
-	// TLogs. If this is a quiescent check, then each commit proxy needs to respond, otherwise only one needs to
-	// respond. Returns false if there is a failure (in this case, keyServersPromise will never be set)
-	ACTOR Future<bool> getKeyServers(
-	    Database cx,
-	    ConsistencyCheckWorkload* self,
-	    Promise<std::vector<std::pair<KeyRange, vector<StorageServerInterface>>>> keyServersPromise,
-	    KeyRangeRef kr) {
-		state std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> keyServers;
-
-		// Try getting key server locations from the master proxies
-		state vector<Future<ErrorOr<GetKeyServerLocationsReply>>> keyServerLocationFutures;
-		state Key begin = kr.begin;
-		state Key end = kr.end;
-		state int limitKeyServers = BUGGIFY ? 1 : 100;
-		state Span span(deterministicRandom()->randomUniqueID(), "WL:ConsistencyCheck"_loc);
-
-		while (begin < end) {
-			state Reference<CommitProxyInfo> commitProxyInfo = wait(cx->getCommitProxiesFuture(false));
-			keyServerLocationFutures.clear();
-			for (int i = 0; i < commitProxyInfo->size(); i++)
-				keyServerLocationFutures.push_back(
-				    commitProxyInfo->get(i, &CommitProxyInterface::getKeyServersLocations)
-				        .getReplyUnlessFailedFor(
-				            GetKeyServerLocationsRequest(span.context, begin, end, limitKeyServers, false, Arena()),
-				            2,
-				            0));
-
-			state bool keyServersInsertedForThisIteration = false;
-			choose {
-				when(wait(waitForAll(keyServerLocationFutures))) {
-					// Read the key server location results
-					for (int i = 0; i < keyServerLocationFutures.size(); i++) {
-						ErrorOr<GetKeyServerLocationsReply> shards = keyServerLocationFutures[i].get();
-
-						// If performing quiescent check, then all master proxies should be reachable.  Otherwise, only
-						// one needs to be reachable
-						if (self->performQuiescentChecks && !shards.present()) {
-							TraceEvent("ConsistencyCheck_CommitProxyUnavailable")
-							    .detail("CommitProxyID", commitProxyInfo->getId(i));
-							self->testFailure("Commit proxy unavailable");
-							return false;
-						}
-
-						// Get the list of shards if one was returned.  If not doing a quiescent check, we can break if
-						// it is. If we are doing a quiescent check, then we only need to do this for the first shard.
-						if (shards.present() && !keyServersInsertedForThisIteration) {
-							keyServers.insert(
-							    keyServers.end(), shards.get().results.begin(), shards.get().results.end());
-							keyServersInsertedForThisIteration = true;
-							begin = shards.get().results.back().first.end;
-
-							if (!self->performQuiescentChecks)
-								break;
-						}
-					} // End of For
-				}
-				when(wait(cx->onProxiesChanged())) {}
-			} // End of choose
-
-			if (!keyServersInsertedForThisIteration) // Retry the entire workflow
-				wait(delay(1.0));
-
-		} // End of while
-
-		keyServersPromise.send(keyServers);
-		return true;
-	}
-
-	// Retrieves the locations of all shards in the database
-	// Returns false if there is a failure (in this case, keyLocationPromise will never be set)
-	ACTOR Future<bool> getKeyLocations(Database cx,
-	                                   std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> shards,
-	                                   ConsistencyCheckWorkload* self,
-	                                   Promise<Standalone<VectorRef<KeyValueRef>>> keyLocationPromise) {
-		state Standalone<VectorRef<KeyValueRef>> keyLocations;
-		state Key beginKey = allKeys.begin.withPrefix(keyServersPrefix);
-		state Key endKey = allKeys.end.withPrefix(keyServersPrefix);
-		state int i = 0;
-		state Transaction onErrorTr(cx); // This transaction exists only to access onError and its backoff behavior
-
-		// If the responses are too big, we may use multiple requests to get the key locations.  Each request begins
-		// where the last left off
-		for (; i < shards.size(); i++) {
-			while (beginKey < std::min<KeyRef>(shards[i].first.end, endKey)) {
-				try {
-					Version version = wait(self->getVersion(cx, self));
-
-					GetKeyValuesRequest req;
-					req.begin = firstGreaterOrEqual(beginKey);
-					req.end = firstGreaterOrEqual(std::min<KeyRef>(shards[i].first.end, endKey));
-					req.limit = SERVER_KNOBS->MOVE_KEYS_KRM_LIMIT;
-					req.limitBytes = SERVER_KNOBS->MOVE_KEYS_KRM_LIMIT_BYTES;
-					req.version = version;
-					req.tags = TagSet();
-
-					// Try getting the shard locations from the key servers
-					state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
-					for (const auto& kv : shards[i].second) {
-						resetReply(req);
-						keyValueFutures.push_back(kv.getKeyValues.getReplyUnlessFailedFor(req, 2, 0));
-					}
-
-					wait(waitForAll(keyValueFutures));
-
-					int firstValidStorageServer = -1;
-
-					// Read the shard location results
-					for (int j = 0; j < keyValueFutures.size(); j++) {
-						ErrorOr<GetKeyValuesReply> reply = keyValueFutures[j].get();
-
-						if (!reply.present() || reply.get().error.present()) {
-							// If the storage server didn't reply in a quiescent database, then the check fails
-							if (self->performQuiescentChecks) {
-								TraceEvent("ConsistencyCheck_KeyServerUnavailable")
-								    .detail("StorageServer", shards[i].second[j].id().toString().c_str());
-								self->testFailure("Key server unavailable");
-								return false;
-							}
-
-							// If no storage servers replied, then throw all_alternatives_failed to force a retry
-							else if (firstValidStorageServer < 0 && j == keyValueFutures.size() - 1)
-								throw all_alternatives_failed();
-						}
-
-						// If this is the first storage server, store the locations to send back to the caller
-						else if (firstValidStorageServer < 0) {
-							firstValidStorageServer = j;
-
-							// Otherwise, compare the data to the results from the first storage server.  If they are
-							// different, then the check fails
-						} else if (reply.get().data != keyValueFutures[firstValidStorageServer].get().get().data ||
-						           reply.get().more != keyValueFutures[firstValidStorageServer].get().get().more) {
-							TraceEvent("ConsistencyCheck_InconsistentKeyServers")
-							    .detail("StorageServer1", shards[i].second[firstValidStorageServer].id())
-							    .detail("StorageServer2", shards[i].second[j].id());
-							self->testFailure("Key servers inconsistent", true);
-							return false;
-						}
-					}
-
-					auto keyValueResponse = keyValueFutures[firstValidStorageServer].get().get();
-					RangeResult currentLocations = krmDecodeRanges(
-					    keyServersPrefix,
-					    KeyRangeRef(beginKey.removePrefix(keyServersPrefix),
-					                std::min<KeyRef>(shards[i].first.end, endKey).removePrefix(keyServersPrefix)),
-					    RangeResultRef(keyValueResponse.data, keyValueResponse.more));
-
-					if (keyValueResponse.data.size() && beginKey == keyValueResponse.data[0].key) {
-						keyLocations.push_back_deep(keyLocations.arena(), currentLocations[0]);
-					}
-
-					if (currentLocations.size() > 2) {
-						keyLocations.append_deep(
-						    keyLocations.arena(), &currentLocations[1], currentLocations.size() - 2);
-					}
-
-					// Next iteration should pick up where we left off
-					ASSERT(currentLocations.size() > 1);
-					if (!keyValueResponse.more) {
-						beginKey = shards[i].first.end;
-					} else {
-						beginKey = keyValueResponse.data.end()[-1].key;
-					}
-
-					// If this is the last iteration, then push the allKeys.end KV pair
-					if (beginKey >= endKey)
-						keyLocations.push_back_deep(keyLocations.arena(), currentLocations.end()[-1]);
-				} catch (Error& e) {
-					state Error err = e;
-					wait(onErrorTr.onError(err));
-					TraceEvent("ConsistencyCheck_RetryGetKeyLocations").error(err);
-				}
-			}
-		}
-
-		keyLocationPromise.send(keyLocations);
-		return true;
-	}
-
-	// Retrieves a vector of the storage servers' estimates for the size of a particular shard
-	// If a storage server can't be reached, its estimate will be -1
-	// If there is an error, then the returned vector will have 0 size
-	ACTOR Future<vector<int64_t>> getStorageSizeEstimate(vector<StorageServerInterface> storageServers,
-	                                                     KeyRangeRef shard) {
-		state vector<int64_t> estimatedBytes;
-
-		state WaitMetricsRequest req;
-		req.keys = shard;
-		req.max.bytes = -1;
-		req.min.bytes = 0;
-
-		state vector<Future<ErrorOr<StorageMetrics>>> metricFutures;
-
-		try {
-			// Check the size of the shard on each storage server
-			for (int i = 0; i < storageServers.size(); i++) {
-				resetReply(req);
-				metricFutures.push_back(storageServers[i].waitMetrics.getReplyUnlessFailedFor(req, 2, 0));
-			}
-
-			// Wait for the storage servers to respond
-			wait(waitForAll(metricFutures));
-
-			int firstValidStorageServer = -1;
-
-			// Retrieve the size from the storage server responses
-			for (int i = 0; i < storageServers.size(); i++) {
-				ErrorOr<StorageMetrics> reply = metricFutures[i].get();
-
-				// If the storage server doesn't reply, then return -1
-				if (!reply.present()) {
-					TraceEvent("ConsistencyCheck_FailedToFetchMetrics")
-					    .detail("Begin", printable(shard.begin))
-					    .detail("End", printable(shard.end))
-					    .detail("StorageServer", storageServers[i].id())
-					    .detail("IsTSS", storageServers[i].isTss() ? "True" : "False")
-					    .error(reply.getError());
-					estimatedBytes.push_back(-1);
-				}
-
-				// Add the result to the list of estimates
-				else if (reply.present()) {
-					int64_t numBytes = reply.get().bytes;
-					estimatedBytes.push_back(numBytes);
-					if (firstValidStorageServer < 0)
-						firstValidStorageServer = i;
-					else if (estimatedBytes[firstValidStorageServer] != numBytes) {
-						TraceEvent("ConsistencyCheck_InconsistentStorageMetrics")
-						    .detail("ByteEstimate1", estimatedBytes[firstValidStorageServer])
-						    .detail("ByteEstimate2", numBytes)
-						    .detail("Begin", shard.begin)
-						    .detail("End", shard.end)
-						    .detail("StorageServer1", storageServers[firstValidStorageServer].id())
-						    .detail("StorageServer2", storageServers[i].id())
-						    .detail("IsTSS",
-						            storageServers[i].isTss() || storageServers[firstValidStorageServer].isTss()
-						                ? "True"
-						                : "False");
-					}
-				}
-			}
-		} catch (Error& e) {
-			TraceEvent("ConsistencyCheck_ErrorFetchingMetrics")
-			    .error(e)
-			    .detail("Begin", printable(shard.begin))
-			    .detail("End", printable(shard.end));
-			estimatedBytes.clear();
-		}
-
-		return estimatedBytes;
-	}
-
 	// Comparison function used to compare map elements by value
 	template <class K, class T>
 	static bool compareByValue(std::pair<K, T> a, std::pair<K, T> b) {
 		return a.second < b.second;
-	}
-
-	ACTOR Future<int64_t> getDatabaseSize(Database cx) {
-		state Transaction tr(cx);
-		tr.setOption(FDBTransactionOptions::LOCK_AWARE);
-		loop {
-			try {
-				StorageMetrics metrics =
-				    wait(tr.getStorageMetrics(KeyRangeRef(allKeys.begin, keyServersPrefix), 100000));
-				return metrics.bytes;
-			} catch (Error& e) {
-				wait(tr.onError(e));
-			}
-		}
-	}
-
-	// Checks that the data in each shard is the same on each storage server that it resides on.  Also performs some
-	// sanity checks on the sizes of shards and storage servers. Returns false if there is a failure
-	ACTOR Future<bool> checkDataConsistency(Database cx,
-	                                        VectorRef<KeyValueRef> keyLocations,
-	                                        DatabaseConfiguration configuration,
-	                                        std::map<UID, StorageServerInterface> tssMapping,
-	                                        ConsistencyCheckWorkload* self) {
-		// Stores the total number of bytes on each storage server
-		// In a distributed test, this will be an estimated size
-		state std::map<UID, int64_t> storageServerSizes;
-
-		// Iterate through each shard, checking its values on all of its storage servers
-		// If shardSampleFactor > 1, then not all shards are processed
-		// Also, in a distributed data consistency check, each client processes a subset of the shards
-		// Note: this may cause some shards to be processed more than once or not at all in a non-quiescent database
-		state int effectiveClientCount = (self->distributed) ? self->clientCount : 1;
-		state int i = self->clientId * (self->shardSampleFactor + 1);
-		state int increment =
-		    (self->distributed && !self->firstClient) ? effectiveClientCount * self->shardSampleFactor : 1;
-		state int rateLimitForThisRound =
-		    self->bytesReadInPreviousRound == 0
-		        ? self->rateLimitMax
-		        : std::min(
-		              self->rateLimitMax,
-		              static_cast<int>(ceil(self->bytesReadInPreviousRound /
-		                                    (float)CLIENT_KNOBS->CONSISTENCY_CHECK_ONE_ROUND_TARGET_COMPLETION_TIME)));
-		ASSERT(rateLimitForThisRound >= 0 && rateLimitForThisRound <= self->rateLimitMax);
-		TraceEvent("ConsistencyCheck_RateLimitForThisRound").detail("RateLimit", rateLimitForThisRound);
-		state Reference<IRateControl> rateLimiter = Reference<IRateControl>(new SpeedLimit(rateLimitForThisRound, 1));
-		state double rateLimiterStartTime = now();
-		state int64_t bytesReadInthisRound = 0;
-
-		state double dbSize = 100e12;
-		if (g_network->isSimulated()) {
-			// This call will get all shard ranges in the database, which is too expensive on real clusters.
-			int64_t _dbSize = wait(self->getDatabaseSize(cx));
-			dbSize = _dbSize;
-		}
-
-		state vector<KeyRangeRef> ranges;
-
-		for (int k = 0; k < keyLocations.size() - 1; k++) {
-			KeyRangeRef range(keyLocations[k].key, keyLocations[k + 1].key);
-			ranges.push_back(range);
-		}
-
-		state vector<int> shardOrder;
-		shardOrder.reserve(ranges.size());
-		for (int k = 0; k < ranges.size(); k++)
-			shardOrder.push_back(k);
-		if (self->shuffleShards) {
-			uint32_t seed = self->sharedRandomNumber + self->repetitions;
-			DeterministicRandom sharedRandom(seed == 0 ? 1 : seed);
-			sharedRandom.randomShuffle(shardOrder);
-		}
-
-		for (; i < ranges.size(); i += increment) {
-			state int shard = shardOrder[i];
-
-			state KeyRangeRef range = ranges[shard];
-			state vector<UID> sourceStorageServers;
-			state vector<UID> destStorageServers;
-			state Transaction tr(cx);
-			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
-			state int bytesReadInRange = 0;
-
-			RangeResult UIDtoTagMap = wait(tr.getRange(serverTagKeys, CLIENT_KNOBS->TOO_MANY));
-			ASSERT(!UIDtoTagMap.more && UIDtoTagMap.size() < CLIENT_KNOBS->TOO_MANY);
-			decodeKeyServersValue(
-			    UIDtoTagMap, keyLocations[shard].value, sourceStorageServers, destStorageServers, false);
-
-			// If the destStorageServers is non-empty, then this shard is being relocated
-			state bool isRelocating = destStorageServers.size() > 0;
-
-			// This check was disabled because we now disable data distribution during the consistency check,
-			// which can leave shards with dest storage servers.
-
-			// Disallow relocations in a quiescent database
-			/*if(self->firstClient && self->performQuiescentChecks && isRelocating)
-			{
-			    TraceEvent("ConsistencyCheck_QuiescentShardRelocation").detail("ShardBegin", printable(range.start)).detail("ShardEnd", printable(range.end));
-			    self->testFailure("Shard is being relocated in quiescent database");
-			    return false;
-			}*/
-
-			// In a quiescent database, check that the team size is the same as the desired team size
-			if (self->firstClient && self->performQuiescentChecks &&
-			    sourceStorageServers.size() != configuration.usableRegions * configuration.storageTeamSize) {
-				TraceEvent("ConsistencyCheck_InvalidTeamSize")
-				    .detail("ShardBegin", printable(range.begin))
-				    .detail("ShardEnd", printable(range.end))
-				    .detail("SourceTeamSize", sourceStorageServers.size())
-				    .detail("DestServerSize", destStorageServers.size())
-				    .detail("ConfigStorageTeamSize", configuration.storageTeamSize)
-				    .detail("UsableRegions", configuration.usableRegions);
-				// Record the server reponsible for the problematic shards
-				int i = 0;
-				for (auto& id : sourceStorageServers) {
-					TraceEvent("IncorrectSizeTeamInfo").detail("ServerUID", id).detail("TeamIndex", i++);
-				}
-				self->testFailure("Invalid team size");
-				return false;
-			}
-
-			state vector<UID> storageServers = (isRelocating) ? destStorageServers : sourceStorageServers;
-			state vector<StorageServerInterface> storageServerInterfaces;
-
-			//TraceEvent("ConsistencyCheck_GetStorageInfo").detail("StorageServers", storageServers.size());
-			loop {
-				try {
-					vector<Future<Optional<Value>>> serverListEntries;
-					serverListEntries.reserve(storageServers.size());
-					for (int s = 0; s < storageServers.size(); s++)
-						serverListEntries.push_back(tr.get(serverListKeyFor(storageServers[s])));
-					state vector<Optional<Value>> serverListValues = wait(getAll(serverListEntries));
-					for (int s = 0; s < serverListValues.size(); s++) {
-						if (serverListValues[s].present())
-							storageServerInterfaces.push_back(decodeServerListValue(serverListValues[s].get()));
-						else if (self->performQuiescentChecks)
-							self->testFailure("/FF/serverList changing in a quiescent database");
-					}
-
-					break;
-				} catch (Error& e) {
-					wait(tr.onError(e));
-				}
-			}
-
-			// add TSS to end of list, if configured and if not relocating
-			if (!isRelocating && self->performTSSCheck) {
-				int initialSize = storageServers.size();
-				for (int i = 0; i < initialSize; i++) {
-					auto tssPair = tssMapping.find(storageServers[i]);
-					if (tssPair != tssMapping.end()) {
-						TEST(true); // TSS checked in consistency check
-						storageServers.push_back(tssPair->second.id());
-						storageServerInterfaces.push_back(tssPair->second);
-					}
-				}
-			}
-
-			state vector<int64_t> estimatedBytes = wait(self->getStorageSizeEstimate(storageServerInterfaces, range));
-
-			// Gets permitted size range of shard
-			int64_t maxShardSize = getMaxShardSize(dbSize);
-			state ShardSizeBounds shardBounds = getShardSizeBounds(range, maxShardSize);
-
-			if (self->firstClient) {
-				// If there was an error retrieving shard estimated size
-				if (self->performQuiescentChecks && estimatedBytes.size() == 0)
-					self->testFailure("Error fetching storage metrics");
-
-				// If running a distributed test, storage server size is an accumulation of shard estimates
-				else if (self->distributed && self->firstClient)
-					for (int j = 0; j < storageServers.size(); j++)
-						storageServerSizes[storageServers[j]] += std::max(estimatedBytes[j], (int64_t)0);
-			}
-
-			// The first client may need to skip the rest of the loop contents if it is just processing this shard to
-			// get a size estimate
-			if (!self->firstClient || shard % (effectiveClientCount * self->shardSampleFactor) == 0) {
-				state int shardKeys = 0;
-				state int shardBytes = 0;
-				state int sampledBytes = 0;
-				state int splitBytes = 0;
-				state int firstKeySampledBytes = 0;
-				state int sampledKeys = 0;
-				state int sampledKeysWithProb = 0;
-				state double shardVariance = 0;
-				state bool canSplit = false;
-				state Key lastSampleKey;
-				state Key lastStartSampleKey;
-				state int64_t totalReadAmount = 0;
-
-				state KeySelector begin = firstGreaterOrEqual(range.begin);
-				state Transaction onErrorTr(
-				    cx); // This transaction exists only to access onError and its backoff behavior
-
-				// Read a limited number of entries at a time, repeating until all keys in the shard have been read
-				loop {
-					try {
-						lastSampleKey = lastStartSampleKey;
-
-						// Get the min version of the storage servers
-						Version version = wait(self->getVersion(cx, self));
-
-						state GetKeyValuesRequest req;
-						req.begin = begin;
-						req.end = firstGreaterOrEqual(range.end);
-						req.limit = 1e4;
-						req.limitBytes = CLIENT_KNOBS->REPLY_BYTE_LIMIT;
-						req.version = version;
-						req.tags = TagSet();
-
-						// Try getting the entries in the specified range
-						state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
-						state int j = 0;
-						for (j = 0; j < storageServerInterfaces.size(); j++) {
-							resetReply(req);
-							keyValueFutures.push_back(
-							    storageServerInterfaces[j].getKeyValues.getReplyUnlessFailedFor(req, 2, 0));
-						}
-
-						wait(waitForAll(keyValueFutures));
-
-						// Read the resulting entries
-						state int firstValidServer = -1;
-						totalReadAmount = 0;
-						for (j = 0; j < keyValueFutures.size(); j++) {
-							ErrorOr<GetKeyValuesReply> rangeResult = keyValueFutures[j].get();
-
-							// Compare the results with other storage servers
-							if (rangeResult.present() && !rangeResult.get().error.present()) {
-								state GetKeyValuesReply current = rangeResult.get();
-								totalReadAmount += current.data.expectedSize();
-								// If we haven't encountered a valid storage server yet, then mark this as the baseline
-								// to compare against
-								if (firstValidServer == -1)
-									firstValidServer = j;
-
-								// Compare this shard against the first
-								else {
-									GetKeyValuesReply reference = keyValueFutures[firstValidServer].get().get();
-
-									if (current.data != reference.data || current.more != reference.more) {
-										// Be especially verbose if in simulation
-										if (g_network->isSimulated()) {
-											int invalidIndex = -1;
-											printf("\n%sSERVER %d (%s); shard = %s - %s:\n",
-											       storageServerInterfaces[j].isTss() ? "TSS " : "",
-											       j,
-											       storageServerInterfaces[j].address().toString().c_str(),
-											       printable(req.begin.getKey()).c_str(),
-											       printable(req.end.getKey()).c_str());
-											for (int k = 0; k < current.data.size(); k++) {
-												printf("%d. %s => %s\n",
-												       k,
-												       printable(current.data[k].key).c_str(),
-												       printable(current.data[k].value).c_str());
-												if (invalidIndex < 0 &&
-												    (k >= reference.data.size() ||
-												     current.data[k].key != reference.data[k].key ||
-												     current.data[k].value != reference.data[k].value))
-													invalidIndex = k;
-											}
-
-											printf(
-											    "\n%sSERVER %d (%s); shard = %s - %s:\n",
-											    storageServerInterfaces[firstValidServer].isTss() ? "TSS " : "",
-											    firstValidServer,
-											    storageServerInterfaces[firstValidServer].address().toString().c_str(),
-											    printable(req.begin.getKey()).c_str(),
-											    printable(req.end.getKey()).c_str());
-											for (int k = 0; k < reference.data.size(); k++) {
-												printf("%d. %s => %s\n",
-												       k,
-												       printable(reference.data[k].key).c_str(),
-												       printable(reference.data[k].value).c_str());
-												if (invalidIndex < 0 &&
-												    (k >= current.data.size() ||
-												     reference.data[k].key != current.data[k].key ||
-												     reference.data[k].value != current.data[k].value))
-													invalidIndex = k;
-											}
-
-											printf("\nMISMATCH AT %d\n\n", invalidIndex);
-										}
-
-										// Data for trace event
-										// The number of keys unique to the current shard
-										int currentUniques = 0;
-										// The number of keys unique to the reference shard
-										int referenceUniques = 0;
-										// The number of keys in both shards with conflicting values
-										int valueMismatches = 0;
-										// The number of keys in both shards with matching values
-										int matchingKVPairs = 0;
-										// Last unique key on the current shard
-										KeyRef currentUniqueKey;
-										// Last unique key on the reference shard
-										KeyRef referenceUniqueKey;
-										// Last value mismatch
-										KeyRef valueMismatchKey;
-
-										// Loop indeces
-										int currentI = 0;
-										int referenceI = 0;
-										while (currentI < current.data.size() || referenceI < reference.data.size()) {
-											if (currentI >= current.data.size()) {
-												referenceUniqueKey = reference.data[referenceI].key;
-												referenceUniques++;
-												referenceI++;
-											} else if (referenceI >= reference.data.size()) {
-												currentUniqueKey = current.data[currentI].key;
-												currentUniques++;
-												currentI++;
-											} else {
-												KeyValueRef currentKV = current.data[currentI];
-												KeyValueRef referenceKV = reference.data[referenceI];
-
-												if (currentKV.key == referenceKV.key) {
-													if (currentKV.value == referenceKV.value)
-														matchingKVPairs++;
-													else {
-														valueMismatchKey = currentKV.key;
-														valueMismatches++;
-													}
-
-													currentI++;
-													referenceI++;
-												} else if (currentKV.key < referenceKV.key) {
-													currentUniqueKey = currentKV.key;
-													currentUniques++;
-													currentI++;
-												} else {
-													referenceUniqueKey = referenceKV.key;
-													referenceUniques++;
-													referenceI++;
-												}
-											}
-										}
-
-										TraceEvent("ConsistencyCheck_DataInconsistent")
-										    .detail(format("StorageServer%d", j).c_str(), storageServers[j].toString())
-										    .detail(format("StorageServer%d", firstValidServer).c_str(),
-										            storageServers[firstValidServer].toString())
-										    .detail("ShardBegin", req.begin.getKey())
-										    .detail("ShardEnd", req.end.getKey())
-										    .detail("VersionNumber", req.version)
-										    .detail(format("Server%dUniques", j).c_str(), currentUniques)
-										    .detail(format("Server%dUniqueKey", j).c_str(), currentUniqueKey)
-										    .detail(format("Server%dUniques", firstValidServer).c_str(),
-										            referenceUniques)
-										    .detail(format("Server%dUniqueKey", firstValidServer).c_str(),
-										            referenceUniqueKey)
-										    .detail("ValueMismatches", valueMismatches)
-										    .detail("ValueMismatchKey", valueMismatchKey)
-										    .detail("MatchingKVPairs", matchingKVPairs)
-										    .detail("IsTSS",
-										            storageServerInterfaces[j].isTss() ||
-										                    storageServerInterfaces[firstValidServer].isTss()
-										                ? "True"
-										                : "False");
-
-										if ((g_network->isSimulated() &&
-										     g_simulator.tssMode != ISimulator::TSSMode::EnabledDropMutations) ||
-										    (!storageServerInterfaces[j].isTss() &&
-										     !storageServerInterfaces[firstValidServer].isTss())) {
-											self->testFailure("Data inconsistent", true);
-											return false;
-										}
-									}
-								}
-							}
-
-							// If the data is not available and we aren't relocating this shard
-							else if (!isRelocating) {
-								Error e =
-								    rangeResult.isError() ? rangeResult.getError() : rangeResult.get().error.get();
-
-								TraceEvent("ConsistencyCheck_StorageServerUnavailable")
-								    .suppressFor(1.0)
-								    .detail("StorageServer", storageServers[j])
-								    .detail("ShardBegin", printable(range.begin))
-								    .detail("ShardEnd", printable(range.end))
-								    .detail("Address", storageServerInterfaces[j].address())
-								    .detail("UID", storageServerInterfaces[j].id())
-								    .detail("GetKeyValuesToken",
-								            storageServerInterfaces[j].getKeyValues.getEndpoint().token)
-								    .detail("IsTSS", storageServerInterfaces[j].isTss() ? "True" : "False")
-								    .error(e);
-
-								// All shards should be available in quiscence
-								if (self->performQuiescentChecks && !storageServerInterfaces[j].isTss()) {
-									self->testFailure("Storage server unavailable");
-									return false;
-								}
-							}
-						}
-
-						if (firstValidServer >= 0) {
-							VectorRef<KeyValueRef> data = keyValueFutures[firstValidServer].get().get().data;
-							// Calculate the size of the shard, the variance of the shard size estimate, and the correct
-							// shard size estimate
-							for (int k = 0; k < data.size(); k++) {
-								ByteSampleInfo sampleInfo = isKeyValueInSample(data[k]);
-								shardBytes += sampleInfo.size;
-								double itemProbability = ((double)sampleInfo.size) / sampleInfo.sampledSize;
-								if (itemProbability < 1)
-									shardVariance += itemProbability * (1 - itemProbability) *
-									                 pow((double)sampleInfo.sampledSize, 2);
-
-								if (sampleInfo.inSample) {
-									sampledBytes += sampleInfo.sampledSize;
-									if (!canSplit && sampledBytes >= shardBounds.min.bytes &&
-									    data[k].key.size() <= CLIENT_KNOBS->SPLIT_KEY_SIZE_LIMIT &&
-									    sampledBytes <= shardBounds.max.bytes *
-									                        CLIENT_KNOBS->STORAGE_METRICS_UNFAIR_SPLIT_LIMIT / 2) {
-										canSplit = true;
-										splitBytes = sampledBytes;
-									}
-
-									/*TraceEvent("ConsistencyCheck_ByteSample").detail("ShardBegin", printable(range.begin)).detail("ShardEnd", printable(range.end))
-									    .detail("SampledBytes", sampleInfo.sampledSize).detail("Key",
-									   printable(data[k].key)).detail("KeySize", data[k].key.size()).detail("ValueSize",
-									   data[k].value.size());*/
-
-									// In data distribution, the splitting process ignores the first key in a shard.
-									// Thus, we shouldn't consider it when validating the upper bound of estimated shard
-									// sizes
-									if (k == 0)
-										firstKeySampledBytes += sampleInfo.sampledSize;
-
-									sampledKeys++;
-									if (itemProbability < 1) {
-										sampledKeysWithProb++;
-									}
-								}
-							}
-
-							// Accumulate number of keys in this shard
-							shardKeys += data.size();
-						}
-						// after requesting each shard, enforce rate limit based on how much data will likely be read
-						if (rateLimitForThisRound > 0) {
-							wait(rateLimiter->getAllowance(totalReadAmount));
-							// Set ratelimit to max allowed if current round has been going on for a while
-							if (now() - rateLimiterStartTime >
-							        1.1 * CLIENT_KNOBS->CONSISTENCY_CHECK_ONE_ROUND_TARGET_COMPLETION_TIME &&
-							    rateLimitForThisRound != self->rateLimitMax) {
-								rateLimitForThisRound = self->rateLimitMax;
-								rateLimiter = Reference<IRateControl>(new SpeedLimit(rateLimitForThisRound, 1));
-								rateLimiterStartTime = now();
-								TraceEvent(SevInfo, "ConsistencyCheck_RateLimitSetMaxForThisRound")
-								    .detail("RateLimit", rateLimitForThisRound);
-							}
-						}
-						bytesReadInRange += totalReadAmount;
-						bytesReadInthisRound += totalReadAmount;
-
-						// Advance to the next set of entries
-						if (firstValidServer >= 0 && keyValueFutures[firstValidServer].get().get().more) {
-							VectorRef<KeyValueRef> result = keyValueFutures[firstValidServer].get().get().data;
-							ASSERT(result.size() > 0);
-							begin = firstGreaterThan(result[result.size() - 1].key);
-							ASSERT(begin.getKey() != allKeys.end);
-							lastStartSampleKey = lastSampleKey;
-						} else
-							break;
-					} catch (Error& e) {
-						state Error err = e;
-						wait(onErrorTr.onError(err));
-						TraceEvent("ConsistencyCheck_RetryDataConsistency").error(err);
-					}
-				}
-
-				canSplit = canSplit && sampledBytes - splitBytes >= shardBounds.min.bytes && sampledBytes > splitBytes;
-
-				// Update the size of all storage servers containing this shard
-				// This is only done in a non-distributed consistency check; the distributed check uses shard size
-				// estimates
-				if (!self->distributed)
-					for (int j = 0; j < storageServers.size(); j++)
-						storageServerSizes[storageServers[j]] += shardBytes;
-
-				bool hasValidEstimate = estimatedBytes.size() > 0;
-
-				// If the storage servers' sampled estimate of shard size is different from ours
-				if (self->performQuiescentChecks) {
-					for (int j = 0; j < estimatedBytes.size(); j++) {
-						if (estimatedBytes[j] >= 0 && estimatedBytes[j] != sampledBytes) {
-							TraceEvent("ConsistencyCheck_IncorrectEstimate")
-							    .detail("EstimatedBytes", estimatedBytes[j])
-							    .detail("CorrectSampledBytes", sampledBytes)
-							    .detail("StorageServer", storageServers[j])
-							    .detail("IsTSS", storageServerInterfaces[j].isTss() ? "True" : "False");
-
-							if (!storageServerInterfaces[j].isTss()) {
-								self->testFailure("Storage servers had incorrect sampled estimate");
-							}
-
-							hasValidEstimate = false;
-
-							break;
-						} else if (estimatedBytes[j] < 0 &&
-						           (g_network->isSimulated() || !storageServerInterfaces[j].isTss())) {
-							self->testFailure("Could not get storage metrics from server");
-							hasValidEstimate = false;
-							break;
-						}
-					}
-				}
-
-				// Compute the difference between the shard size estimate and its actual size.  If it is sufficiently
-				// large, then fail
-				double stdDev = sqrt(shardVariance);
-
-				double failErrorNumStdDev = 7;
-				int estimateError = abs(shardBytes - sampledBytes);
-
-				// Only perform the check if there are sufficient keys to get a distribution that should resemble a
-				// normal distribution
-				if (sampledKeysWithProb > 30 && estimateError > failErrorNumStdDev * stdDev) {
-					double numStdDev = estimateError / sqrt(shardVariance);
-					TraceEvent("ConsistencyCheck_InaccurateShardEstimate")
-					    .detail("Min", shardBounds.min.bytes)
-					    .detail("Max", shardBounds.max.bytes)
-					    .detail("Estimate", sampledBytes)
-					    .detail("Actual", shardBytes)
-					    .detail("NumStdDev", numStdDev)
-					    .detail("Variance", shardVariance)
-					    .detail("StdDev", stdDev)
-					    .detail("ShardBegin", printable(range.begin))
-					    .detail("ShardEnd", printable(range.end))
-					    .detail("NumKeys", shardKeys)
-					    .detail("NumSampledKeys", sampledKeys)
-					    .detail("NumSampledKeysWithProb", sampledKeysWithProb);
-
-					self->testFailure(format("Shard size is more than %f std dev from estimate", failErrorNumStdDev));
-				}
-
-				// In a quiescent database, check that the (estimated) size of the shard is within permitted bounds
-				// Min and max shard sizes have a 3 * shardBounds.permittedError.bytes cushion for error since shard
-				// sizes are not precise Shard splits ignore the first key in a shard, so its size shouldn't be
-				// considered when checking the upper bound 0xff shards are not checked
-				if (canSplit && sampledKeys > 5 && self->performQuiescentChecks &&
-				    !range.begin.startsWith(keyServersPrefix) &&
-				    (sampledBytes < shardBounds.min.bytes - 3 * shardBounds.permittedError.bytes ||
-				     sampledBytes - firstKeySampledBytes >
-				         shardBounds.max.bytes + 3 * shardBounds.permittedError.bytes)) {
-					TraceEvent("ConsistencyCheck_InvalidShardSize")
-					    .detail("Min", shardBounds.min.bytes)
-					    .detail("Max", shardBounds.max.bytes)
-					    .detail("Size", shardBytes)
-					    .detail("EstimatedSize", sampledBytes)
-					    .detail("ShardBegin", printable(range.begin))
-					    .detail("ShardEnd", printable(range.end))
-					    .detail("ShardCount", ranges.size())
-					    .detail("SampledKeys", sampledKeys);
-					self->testFailure(format("Shard size in quiescent database is too %s",
-					                         (sampledBytes < shardBounds.min.bytes) ? "small" : "large"));
-					return false;
-				}
-			}
-
-			if (bytesReadInRange > 0) {
-				TraceEvent("ConsistencyCheck_ReadRange")
-				    .suppressFor(1.0)
-				    .detail("Range", range)
-				    .detail("BytesRead", bytesReadInRange);
-			}
-		}
-
-		// SOMEDAY: when background data distribution is implemented, include this test
-		// In a quiescent database, check that the sizes of storage servers are roughly the same
-		/*if(self->performQuiescentChecks)
-		{
-		    auto minStorageServer = std::min_element(storageServerSizes.begin(), storageServerSizes.end(),
-		ConsistencyCheckWorkload::compareByValue<UID, int64_t>); auto maxStorageServer =
-		std::max_element(storageServerSizes.begin(), storageServerSizes.end(),
-		ConsistencyCheckWorkload::compareByValue<UID, int64_t>);
-
-		    int bias = SERVER_KNOBS->MIN_SHARD_BYTES;
-		    if(1.1 * (minStorageServer->second + SERVER_KNOBS->MIN_SHARD_BYTES) < maxStorageServer->second +
-		SERVER_KNOBS->MIN_SHARD_BYTES)
-		    {
-		        TraceEvent("ConsistencyCheck_InconsistentStorageServerSizes").detail("MinSize", minStorageServer->second).detail("MaxSize", maxStorageServer->second)
-		            .detail("MinStorageServer", minStorageServer->first).detail("MaxStorageServer",
-		maxStorageServer->first);
-
-		        self->testFailure(format("Storage servers differ significantly in size by a factor of %f",
-		((double)maxStorageServer->second) / minStorageServer->second)); return false;
-		    }
-		}*/
-
-		self->bytesReadInPreviousRound = bytesReadInthisRound;
-		return true;
 	}
 
 	// Returns true if any storage servers have the exact same network address or are not using the correct key value
@@ -1711,7 +898,16 @@ struct ConsistencyCheckWorkload : TestWorkload {
 	                                              ConsistencyCheckWorkload* self) {
 		state int i;
 		state int j;
-		state vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+		state std::vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+		state std::string wiggleLocalityKeyValue = configuration.perpetualStorageWiggleLocality;
+		state std::string wiggleLocalityKey;
+		state std::string wiggleLocalityValue;
+		if (wiggleLocalityKeyValue != "0") {
+			int split = wiggleLocalityKeyValue.find(':');
+			wiggleLocalityKey = wiggleLocalityKeyValue.substr(0, split);
+			wiggleLocalityValue = wiggleLocalityKeyValue.substr(split + 1);
+		}
+
 		// Check each pair of storage servers for an address match
 		for (i = 0; i < storageServers.size(); i++) {
 			// Check that each storage server has the correct key value store type
@@ -1722,10 +918,13 @@ struct ConsistencyCheckWorkload : TestWorkload {
 			if (!keyValueStoreType.present()) {
 				TraceEvent("ConsistencyCheck_ServerUnavailable").detail("ServerID", storageServers[i].id());
 				self->testFailure("Storage server unavailable");
-			} else if ((!storageServers[i].isTss() &&
-			            keyValueStoreType.get() != configuration.storageServerStoreType) ||
-			           (storageServers[i].isTss() &&
-			            keyValueStoreType.get() != configuration.testingStorageServerStoreType)) {
+			} else if (((!storageServers[i].isTss() &&
+			             keyValueStoreType.get() != configuration.storageServerStoreType) ||
+			            (storageServers[i].isTss() &&
+			             keyValueStoreType.get() != configuration.testingStorageServerStoreType)) &&
+			           (wiggleLocalityKeyValue == "0" ||
+			            (storageServers[i].locality.get(wiggleLocalityKey).present() &&
+			             storageServers[i].locality.get(wiggleLocalityKey).get().toString() == wiggleLocalityValue))) {
 				TraceEvent("ConsistencyCheck_WrongKeyValueStoreType")
 				    .detail("ServerID", storageServers[i].id())
 				    .detail("StoreType", keyValueStoreType.get().toString())
@@ -1755,8 +954,8 @@ struct ConsistencyCheckWorkload : TestWorkload {
 	                                   DatabaseConfiguration configuration,
 	                                   std::map<UID, StorageServerInterface> tssMapping,
 	                                   ConsistencyCheckWorkload* self) {
-		state vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
-		state vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+		state std::vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
+		state std::vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
 		std::vector<Optional<Key>> missingStorage; // vector instead of a set to get the count
 
 		for (int i = 0; i < workers.size(); i++) {
@@ -1901,7 +1100,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					// FIXME: this is hiding the fact that we can recruit a new storage server on a location the has
 					// files left behind by a previous failure
 					// this means that the process is wasting disk space until the process is rebooting
-					ISimulator::ProcessInfo* p = g_simulator.getProcessByAddress(itr->interf.address());
+					ISimulator::ProcessInfo* p = g_simulator->getProcessByAddress(itr->interf.address());
 					// Note: itr->interf.address() may not equal to p->address() because role's endpoint's primary
 					// addr can be swapped by choosePrimaryAddress() based on its peer's tls config.
 					TraceEvent("ConsistencyCheck_RebootProcess")
@@ -1910,14 +1109,14 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					    .detail("ProcessPrimaryAddress", p->address)
 					    .detail("ProcessAddresses", p->addresses.toString())
 					    .detail("DataStoreID", id)
-					    .detail("Protected", g_simulator.protectedAddresses.count(itr->interf.address()))
+					    .detail("Protected", g_simulator->protectedAddresses.count(itr->interf.address()))
 					    .detail("Reliable", p->isReliable())
 					    .detail("ReliableInfo", p->getReliableInfo())
 					    .detail("KillOrRebootProcess", p->address);
 					if (p->isReliable()) {
-						g_simulator.rebootProcess(p, ISimulator::RebootProcess);
+						g_simulator->rebootProcess(p, ISimulator::RebootProcess);
 					} else {
-						g_simulator.killProcess(p, ISimulator::KillInstantly);
+						g_simulator->killProcess(p, ISimulator::KillInstantly);
 					}
 				}
 
@@ -1926,6 +1125,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		}
 
 		if (foundExtraDataStore) {
+			wait(delay(10)); // let the cluster get to fully_recovered after the reboot before retrying
 			self->testFailure("Extra data stores present on workers");
 			return false;
 		}
@@ -1933,16 +1133,90 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		return true;
 	}
 
-	ACTOR Future<bool> checkWorkerList(Database cx, ConsistencyCheckWorkload* self) {
-		if (g_simulator.extraDB)
-			return true;
+	// Checks if the blob workers are "correct".
+	// Returns false if ANY of the following
+	// - any blob worker is on a diff DC than the blob manager/CC, or
+	// - any worker that should have a blob worker does not have exactly one, or
+	// - any worker that should NOT have a blob worker does indeed have one
+	ACTOR Future<bool> checkBlobWorkers(Database cx,
+	                                    DatabaseConfiguration configuration,
+	                                    ConsistencyCheckWorkload* self) {
+		state std::vector<BlobWorkerInterface> blobWorkers = wait(getBlobWorkers(cx));
+		state std::vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
 
-		vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
+		// process addr -> num blob workers on that process
+		state std::unordered_map<NetworkAddress, int> blobWorkersByAddr;
+		Optional<Key> ccDcId;
+		NetworkAddress ccAddr = self->dbInfo->get().clusterInterface.clientInterface.address();
+
+		// get the CC's DCID
+		for (const auto& worker : workers) {
+			if (ccAddr == worker.interf.address()) {
+				ccDcId = worker.interf.locality.dcId();
+				break;
+			}
+		}
+
+		if (!ccDcId.present()) {
+			TraceEvent("ConsistencyCheck_DidNotFindCC");
+			return false;
+		}
+
+		for (const auto& bwi : blobWorkers) {
+			if (bwi.locality.dcId() != ccDcId) {
+				TraceEvent("ConsistencyCheck_BWOnDiffDcThanCC")
+				    .detail("BWID", bwi.id())
+				    .detail("BwDcId", bwi.locality.dcId())
+				    .detail("CcDcId", ccDcId);
+				return false;
+			}
+			blobWorkersByAddr[bwi.stableAddress()]++;
+		}
+
+		int numBlobWorkerProcesses = 0;
+		for (const auto& worker : workers) {
+			NetworkAddress addr = worker.interf.stableAddress();
+			bool inCCDc = worker.interf.locality.dcId() == ccDcId;
+			if (!configuration.isExcludedServer(worker.interf.addresses())) {
+				if (worker.processClass == ProcessClass::BlobWorkerClass) {
+					numBlobWorkerProcesses++;
+
+					// this is a worker with processClass == BWClass, so should have exactly one blob worker if it's in
+					// the same DC
+					int desiredBlobWorkersOnAddr = inCCDc ? 1 : 0;
+
+					if (blobWorkersByAddr[addr] != desiredBlobWorkersOnAddr) {
+						TraceEvent("ConsistencyCheck_WrongBWCountOnBWClass")
+						    .detail("Address", addr)
+						    .detail("NumBlobWorkersOnAddr", blobWorkersByAddr[addr])
+						    .detail("DesiredBlobWorkersOnAddr", desiredBlobWorkersOnAddr)
+						    .detail("BwDcId", worker.interf.locality.dcId())
+						    .detail("CcDcId", ccDcId);
+						return false;
+					}
+				} else {
+					// this is a worker with processClass != BWClass, so there should be no BWs on it
+					if (blobWorkersByAddr[addr] > 0) {
+						TraceEvent("ConsistencyCheck_BWOnNonBWClass").detail("Address", addr);
+						return false;
+					}
+				}
+			}
+		}
+		return numBlobWorkerProcesses > 0;
+	}
+
+	ACTOR Future<bool> checkWorkerList(Database cx, ConsistencyCheckWorkload* self) {
+		if (!g_simulator->extraDatabases.empty()) {
+			return true;
+		}
+
+		std::vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
 		std::set<NetworkAddress> workerAddresses;
 
 		for (const auto& it : workers) {
 			NetworkAddress addr = it.interf.tLog.getEndpoint().addresses.getTLSAddress();
-			ISimulator::ProcessInfo* info = g_simulator.getProcessByAddress(addr);
+			ISimulator::ProcessInfo* info = g_simulator->getProcessByAddress(addr);
 			if (!info || info->failed) {
 				TraceEvent("ConsistencyCheck_FailedWorkerInList").detail("Addr", it.interf.address());
 				return false;
@@ -1950,7 +1224,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 			workerAddresses.insert(NetworkAddress(addr.ip, addr.port, true, addr.isTLS()));
 		}
 
-		vector<ISimulator::ProcessInfo*> all = g_simulator.getAllProcesses();
+		std::vector<ISimulator::ProcessInfo*> all = g_simulator->getAllProcesses();
 		for (int i = 0; i < all.size(); i++) {
 			if (all[i]->isReliable() && all[i]->name == std::string("Server") &&
 			    all[i]->startingClass != ProcessClass::TesterClass &&
@@ -1996,9 +1270,10 @@ struct ConsistencyCheckWorkload : TestWorkload {
 					return false;
 				}
 
-				state ClusterConnectionString old(currentKey.get().toString());
+				ClusterConnectionString old(currentKey.get().toString());
+				state std::vector<NetworkAddress> oldCoordinators = wait(old.tryResolveHostnames());
 
-				vector<ProcessData> workers = wait(::getWorkers(&tr));
+				std::vector<ProcessData> workers = wait(::getWorkers(&tr));
 
 				std::map<NetworkAddress, LocalityData> addr_locality;
 				for (auto w : workers) {
@@ -2006,7 +1281,7 @@ struct ConsistencyCheckWorkload : TestWorkload {
 				}
 
 				std::set<Optional<Standalone<StringRef>>> checkDuplicates;
-				for (const auto& addr : old.coordinators()) {
+				for (const auto& addr : oldCoordinators) {
 					auto findResult = addr_locality.find(addr);
 					if (findResult != addr_locality.end()) {
 						if (checkDuplicates.count(findResult->second.zoneId())) {
@@ -2031,8 +1306,8 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		state Optional<Key> expectedPrimaryDcId;
 		state Optional<Key> expectedRemoteDcId;
 		state DatabaseConfiguration config = wait(getDatabaseConfiguration(cx));
-		state vector<WorkerDetails> allWorkers = wait(getWorkers(self->dbInfo));
-		state vector<WorkerDetails> nonExcludedWorkers =
+		state std::vector<WorkerDetails> allWorkers = wait(getWorkers(self->dbInfo));
+		state std::vector<WorkerDetails> nonExcludedWorkers =
 		    wait(getWorkers(self->dbInfo, GetWorkersRequest::NON_EXCLUDED_PROCESSES_ONLY));
 		auto& db = self->dbInfo->get();
 
@@ -2079,10 +1354,10 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		}
 		// Check if master and cluster controller are in the desired DC for fearless cluster when running under
 		// simulation
-		// FIXME: g_simulator.datacenterDead could return false positives. Relaxing checks until it is fixed.
-		if (g_network->isSimulated() && config.usableRegions > 1 && g_simulator.primaryDcId.present() &&
-		    !g_simulator.datacenterDead(g_simulator.primaryDcId) &&
-		    !g_simulator.datacenterDead(g_simulator.remoteDcId)) {
+		// FIXME: g_simulator->datacenterDead could return false positives. Relaxing checks until it is fixed.
+		if (g_network->isSimulated() && config.usableRegions > 1 && g_simulator->primaryDcId.present() &&
+		    !g_simulator->datacenterDead(g_simulator->primaryDcId) &&
+		    !g_simulator->datacenterDead(g_simulator->remoteDcId)) {
 			expectedPrimaryDcId = config.regions[0].dcId;
 			expectedRemoteDcId = config.regions[1].dcId;
 			// If the priorities are equal, either could be the primary
@@ -2201,9 +1476,9 @@ struct ConsistencyCheckWorkload : TestWorkload {
 		}
 
 		// Check LogRouter
-		if (g_network->isSimulated() && config.usableRegions > 1 && g_simulator.primaryDcId.present() &&
-		    !g_simulator.datacenterDead(g_simulator.primaryDcId) &&
-		    !g_simulator.datacenterDead(g_simulator.remoteDcId)) {
+		if (g_network->isSimulated() && config.usableRegions > 1 && g_simulator->primaryDcId.present() &&
+		    !g_simulator->datacenterDead(g_simulator->primaryDcId) &&
+		    !g_simulator->datacenterDead(g_simulator->remoteDcId)) {
 			for (auto& tlogSet : db.logSystemConfig.tLogs) {
 				if (!tlogSet.isLocal && tlogSet.logRouters.size()) {
 					for (auto& logRouter : tlogSet.logRouters) {
@@ -2257,10 +1532,57 @@ struct ConsistencyCheckWorkload : TestWorkload {
 			return false;
 		}
 
+		// Check BlobManager
+		if (config.blobGranulesEnabled && db.blobManager.present() &&
+		    (!nonExcludedWorkerProcessMap.count(db.blobManager.get().address()) ||
+		     nonExcludedWorkerProcessMap[db.blobManager.get().address()].processClass.machineClassFitness(
+		         ProcessClass::BlobManager) > fitnessLowerBound)) {
+			TraceEvent("ConsistencyCheck_BlobManagerNotBest")
+			    .detail("BestBlobManagerFitness", fitnessLowerBound)
+			    .detail(
+			        "ExistingBlobManagerFitness",
+			        nonExcludedWorkerProcessMap.count(db.blobManager.get().address())
+			            ? nonExcludedWorkerProcessMap[db.blobManager.get().address()].processClass.machineClassFitness(
+			                  ProcessClass::BlobManager)
+			            : -1);
+			return false;
+		}
+
+		// Check BlobMigrator
+		if (config.blobGranulesEnabled && db.blobMigrator.present() &&
+		    (!nonExcludedWorkerProcessMap.count(db.blobMigrator.get().address()) ||
+		     nonExcludedWorkerProcessMap[db.blobMigrator.get().address()].processClass.machineClassFitness(
+		         ProcessClass::BlobMigrator) > fitnessLowerBound)) {
+			TraceEvent("ConsistencyCheck_BlobMigratorNotBest")
+			    .detail("BestBlobMigratorFitness", fitnessLowerBound)
+			    .detail(
+			        "ExistingBlobMigratorFitness",
+			        nonExcludedWorkerProcessMap.count(db.blobMigrator.get().address())
+			            ? nonExcludedWorkerProcessMap[db.blobMigrator.get().address()].processClass.machineClassFitness(
+			                  ProcessClass::BlobMigrator)
+			            : -1);
+			return false;
+		}
+
+		// Check EncryptKeyProxy
+		if (SERVER_KNOBS->ENABLE_ENCRYPTION && db.encryptKeyProxy.present() &&
+		    (!nonExcludedWorkerProcessMap.count(db.encryptKeyProxy.get().address()) ||
+		     nonExcludedWorkerProcessMap[db.encryptKeyProxy.get().address()].processClass.machineClassFitness(
+		         ProcessClass::EncryptKeyProxy) > fitnessLowerBound)) {
+			TraceEvent("ConsistencyCheck_EncryptKeyProxyNotBest")
+			    .detail("BestEncryptKeyProxyFitness", fitnessLowerBound)
+			    .detail("ExistingEncryptKeyProxyFitness",
+			            nonExcludedWorkerProcessMap.count(db.encryptKeyProxy.get().address())
+			                ? nonExcludedWorkerProcessMap[db.encryptKeyProxy.get().address()]
+			                      .processClass.machineClassFitness(ProcessClass::EncryptKeyProxy)
+			                : -1);
+			return false;
+		}
+
 		// TODO: Check Tlog
 
 		return true;
 	}
 };
 
-WorkloadFactory<ConsistencyCheckWorkload> ConsistencyCheckWorkloadFactory("ConsistencyCheck");
+WorkloadFactory<ConsistencyCheckWorkload> ConsistencyCheckWorkloadFactory;

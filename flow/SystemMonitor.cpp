@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <fstream>
 
 #include "flow/flow.h"
 #include "flow/Histogram.h"
@@ -37,9 +39,15 @@ void initializeSystemMonitorMachineState(SystemMonitorMachineState machineState)
 	::machineState.monitorStartTime = now();
 }
 
+double machineStartTime() {
+	return ::machineState.monitorStartTime;
+}
+
 void systemMonitor() {
 	static StatisticsState statState = StatisticsState();
+#if !DEBUG_DETERMINISM
 	customSystemMonitor("ProcessMetrics", &statState, true);
+#endif
 }
 
 SystemStatistics getSystemStatistics() {
@@ -60,6 +68,35 @@ SystemStatistics getSystemStatistics() {
 	detail("TotalMemory" #size, FastAllocator<size>::getTotalMemory())                                                 \
 	    .detail("ApproximateUnusedMemory" #size, FastAllocator<size>::getApproximateMemoryUnused())                    \
 	    .detail("ActiveThreads" #size, FastAllocator<size>::getActiveThreads())
+
+namespace {
+
+#ifdef __linux__
+// Converts cgroup key, e.g. nr_periods, to NrPeriods
+std::string capitalizeCgroupKey(const std::string& key) {
+	bool wordStart = true;
+	std::string result;
+	result.reserve(key.size());
+
+	for (const char ch : key) {
+		if (std::isalnum(ch)) {
+			if (wordStart) {
+				result.push_back(std::toupper(ch));
+				wordStart = false;
+			} else {
+				result.push_back(ch);
+			}
+		} else {
+			// Skip non-alnum characters
+			wordStart = true;
+		}
+	}
+
+	return result;
+}
+#endif // __linux__
+
+} // anonymous namespace
 
 SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsState* statState, bool machineMetrics) {
 	const IPAddress ipAddr = machineState.ip.present() ? machineState.ip.get() : IPAddress();
@@ -86,7 +123,9 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 			    .detail("DiskQueueDepth", currentStats.processDiskQueueDepth)
 			    .detail("DiskIdleSeconds", currentStats.processDiskIdleSeconds)
 			    .detail("DiskReads", currentStats.processDiskRead)
+			    .detail("DiskReadSeconds", currentStats.processDiskReadSeconds)
 			    .detail("DiskWrites", currentStats.processDiskWrite)
+			    .detail("DiskWriteSeconds", currentStats.processDiskWriteSeconds)
 			    .detail("DiskReadsCount", currentStats.processDiskReadCount)
 			    .detail("DiskWritesCount", currentStats.processDiskWriteCount)
 			    .detail("DiskWriteSectors", currentStats.processDiskWriteSectors)
@@ -112,6 +151,7 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 			    .detail("DCID", machineState.dcId)
 			    .detail("ZoneID", machineState.zoneId)
 			    .detail("MachineID", machineState.machineId)
+			    .detail("Version", machineState.fdbVersion)
 			    .detail("AIOSubmitCount", netData.countAIOSubmit - statState->networkState.countAIOSubmit)
 			    .detail("AIOCollectCount", netData.countAIOCollect - statState->networkState.countAIOCollect)
 			    .detail("AIOSubmitLag",
@@ -152,10 +192,46 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 			    .DETAILALLOCATORMEMUSAGE(2048)
 			    .DETAILALLOCATORMEMUSAGE(4096)
 			    .DETAILALLOCATORMEMUSAGE(8192)
+			    .DETAILALLOCATORMEMUSAGE(16384)
 			    .detail("HugeArenaMemory", g_hugeArenaMemory.load())
 			    .detail("DCID", machineState.dcId)
 			    .detail("ZoneID", machineState.zoneId)
 			    .detail("MachineID", machineState.machineId);
+
+			uint64_t total_memory = 0;
+			total_memory += FastAllocator<16>::getTotalMemory();
+			total_memory += FastAllocator<32>::getTotalMemory();
+			total_memory += FastAllocator<64>::getTotalMemory();
+			total_memory += FastAllocator<96>::getTotalMemory();
+			total_memory += FastAllocator<128>::getTotalMemory();
+			total_memory += FastAllocator<256>::getTotalMemory();
+			total_memory += FastAllocator<512>::getTotalMemory();
+			total_memory += FastAllocator<1024>::getTotalMemory();
+			total_memory += FastAllocator<2048>::getTotalMemory();
+			total_memory += FastAllocator<4096>::getTotalMemory();
+			total_memory += FastAllocator<8192>::getTotalMemory();
+			total_memory += FastAllocator<16384>::getTotalMemory();
+
+			uint64_t unused_memory = 0;
+			unused_memory += FastAllocator<16>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<32>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<64>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<96>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<128>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<256>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<512>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<1024>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<2048>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<4096>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<8192>::getApproximateMemoryUnused();
+			unused_memory += FastAllocator<16384>::getApproximateMemoryUnused();
+
+			if (total_memory > 0) {
+				TraceEvent("FastAllocMemoryUsage")
+				    .detail("TotalMemory", total_memory)
+				    .detail("UnusedMemory", unused_memory)
+				    .detail("Utilization", format("%f%%", (total_memory - unused_memory) * 100.0 / total_memory));
+			}
 
 			TraceEvent n("NetworkMetrics");
 			n.detail("Elapsed", currentStats.elapsed)
@@ -240,8 +316,8 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 		}
 
 		if (machineMetrics) {
-			TraceEvent("MachineMetrics")
-			    .detail("Elapsed", currentStats.elapsed)
+			auto traceEvent = TraceEvent("MachineMetrics");
+			traceEvent.detail("Elapsed", currentStats.elapsed)
 			    .detail("MbpsSent", currentStats.machineMegabitsSent / currentStats.elapsed)
 			    .detail("MbpsReceived", currentStats.machineMegabitsReceived / currentStats.elapsed)
 			    .detail("OutSegs", currentStats.machineOutSegs)
@@ -254,6 +330,11 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 			    .detail("ZoneID", machineState.zoneId)
 			    .detail("MachineID", machineState.machineId)
 			    .trackLatest("MachineMetrics");
+#ifdef __linux__
+			for (const auto& [k, v] : linux_os::reportCGroupCpuStat()) {
+				traceEvent.detail(capitalizeCgroupKey(k).c_str(), v);
+			}
+#endif // __linux__
 		}
 	}
 
@@ -271,19 +352,19 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 				char* demangled = abi::__cxa_demangle(i->first, nullptr, nullptr, nullptr);
 				if (demangled) {
 					s = demangled;
-					if (StringRef(s).startsWith(LiteralStringRef("(anonymous namespace)::")))
-						s = s.substr(LiteralStringRef("(anonymous namespace)::").size());
+					if (StringRef(s).startsWith("(anonymous namespace)::"_sr))
+						s = s.substr("(anonymous namespace)::"_sr.size());
 					free(demangled);
 				} else
 					s = i->first;
 #else
 				s = i->first;
-				if (StringRef(s).startsWith(LiteralStringRef("class `anonymous namespace'::")))
-					s = s.substr(LiteralStringRef("class `anonymous namespace'::").size());
-				else if (StringRef(s).startsWith(LiteralStringRef("class ")))
-					s = s.substr(LiteralStringRef("class ").size());
-				else if (StringRef(s).startsWith(LiteralStringRef("struct ")))
-					s = s.substr(LiteralStringRef("struct ").size());
+				if (StringRef(s).startsWith("class `anonymous namespace'::"_sr))
+					s = s.substr("class `anonymous namespace'::"_sr.size());
+				else if (StringRef(s).startsWith("class "_sr))
+					s = s.substr("class "_sr.size());
+				else if (StringRef(s).startsWith("struct "_sr))
+					s = s.substr("struct "_sr.size());
 #endif
 				typeNames.emplace_back(s, i->first);
 			}
@@ -370,4 +451,16 @@ SystemStatistics customSystemMonitor(std::string const& eventName, StatisticsSta
 	statState->networkMetricsState = g_network->networkInfo.metrics;
 	statState->networkState = netData;
 	return currentStats;
+}
+
+Future<Void> startMemoryUsageMonitor(uint64_t memLimit) {
+	if (memLimit == 0) {
+		return Void();
+	}
+	auto checkMemoryUsage = [=]() {
+		if (getResidentMemoryUsage() > memLimit) {
+			platform::outOfMemory();
+		}
+	};
+	return recurring(checkMemoryUsage, FLOW_KNOBS->MEMORY_USAGE_CHECK_INTERVAL);
 }

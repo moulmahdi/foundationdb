@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@
 
 // A workload which test the correctness of backup and restore process
 struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
+	static constexpr auto NAME = "BackupAndParallelRestoreCorrectness";
 	double backupAfter, restoreAfter, abortAndRestartAfter;
 	double backupStartAt, restoreStartAfterBackupFinished, stopDifferentialAfter;
 	Key backupTag;
@@ -51,34 +52,33 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 
 	BackupAndParallelRestoreCorrectnessWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 		locked.set(sharedRandomNumber % 2);
-		backupAfter = getOption(options, LiteralStringRef("backupAfter"), 10.0);
-		restoreAfter = getOption(options, LiteralStringRef("restoreAfter"), 35.0);
-		performRestore = getOption(options, LiteralStringRef("performRestore"), true);
-		backupTag = getOption(options, LiteralStringRef("backupTag"), BackupAgentBase::getDefaultTag());
-		backupRangesCount = getOption(options, LiteralStringRef("backupRangesCount"), 5);
-		backupRangeLengthMax = getOption(options, LiteralStringRef("backupRangeLengthMax"), 1);
+		backupAfter = getOption(options, "backupAfter"_sr, 10.0);
+		restoreAfter = getOption(options, "restoreAfter"_sr, 35.0);
+		performRestore = getOption(options, "performRestore"_sr, true);
+		backupTag = getOption(options, "backupTag"_sr, BackupAgentBase::getDefaultTag());
+		backupRangesCount = getOption(options, "backupRangesCount"_sr, 5);
+		backupRangeLengthMax = getOption(options, "backupRangeLengthMax"_sr, 1);
 		abortAndRestartAfter =
 		    getOption(options,
-		              LiteralStringRef("abortAndRestartAfter"),
+		              "abortAndRestartAfter"_sr,
 		              deterministicRandom()->random01() < 0.5
 		                  ? deterministicRandom()->random01() * (restoreAfter - backupAfter) + backupAfter
 		                  : 0.0);
-		differentialBackup = getOption(
-		    options, LiteralStringRef("differentialBackup"), deterministicRandom()->random01() < 0.5 ? true : false);
+		differentialBackup =
+		    getOption(options, "differentialBackup"_sr, deterministicRandom()->random01() < 0.5 ? true : false);
 		stopDifferentialAfter =
 		    getOption(options,
-		              LiteralStringRef("stopDifferentialAfter"),
+		              "stopDifferentialAfter"_sr,
 		              differentialBackup ? deterministicRandom()->random01() *
 		                                           (restoreAfter - std::max(abortAndRestartAfter, backupAfter)) +
 		                                       std::max(abortAndRestartAfter, backupAfter)
 		                                 : 0.0);
-		agentRequest = getOption(options, LiteralStringRef("simBackupAgents"), true);
-		allowPauses = getOption(options, LiteralStringRef("allowPauses"), true);
-		shareLogRange = getOption(options, LiteralStringRef("shareLogRange"), false);
-		usePartitionedLogs.set(
-		    getOption(options, LiteralStringRef("usePartitionedLogs"), deterministicRandom()->coinflip()));
-		addPrefix = getOption(options, LiteralStringRef("addPrefix"), LiteralStringRef(""));
-		removePrefix = getOption(options, LiteralStringRef("removePrefix"), LiteralStringRef(""));
+		agentRequest = getOption(options, "simBackupAgents"_sr, true);
+		allowPauses = getOption(options, "allowPauses"_sr, true);
+		shareLogRange = getOption(options, "shareLogRange"_sr, false);
+		usePartitionedLogs.set(getOption(options, "usePartitionedLogs"_sr, deterministicRandom()->coinflip()));
+		addPrefix = getOption(options, "addPrefix"_sr, ""_sr);
+		removePrefix = getOption(options, "removePrefix"_sr, ""_sr);
 
 		KeyRef beginRange;
 		KeyRef endRange;
@@ -108,11 +108,10 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 		if (shareLogRange) {
 			bool beforePrefix = sharedRandomNumber & 1;
 			if (beforePrefix)
-				backupRanges.push_back_deep(backupRanges.arena(),
-				                            KeyRangeRef(normalKeys.begin, LiteralStringRef("\xfe\xff\xfe")));
+				backupRanges.push_back_deep(backupRanges.arena(), KeyRangeRef(normalKeys.begin, "\xfe\xff\xfe"_sr));
 			else
 				backupRanges.push_back_deep(backupRanges.arena(),
-				                            KeyRangeRef(strinc(LiteralStringRef("\x00\x00\x01")), normalKeys.end));
+				                            KeyRangeRef(strinc("\x00\x00\x01"_sr), normalKeys.end));
 		} else if (backupRangesCount <= 0) {
 			backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
 		} else {
@@ -138,8 +137,6 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 		}
 	}
 
-	std::string description() const override { return "BackupAndParallelRestoreCorrectness"; }
-
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
 	Future<Void> start(Database const& cx) override {
@@ -161,11 +158,11 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 		return _start(cx, this);
 	}
 
-	bool hasPrefix() const { return addPrefix != LiteralStringRef("") || removePrefix != LiteralStringRef(""); }
+	bool hasPrefix() const { return addPrefix != ""_sr || removePrefix != ""_sr; }
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<Void> changePaused(Database cx, FileBackupAgent* backupAgent) {
 		loop {
@@ -218,14 +215,17 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 
 		state std::string backupContainer = "file://simfdb/backups/";
 		state Future<Void> status = statusLoop(cx, tag.toString());
-
+		state DatabaseConfiguration configuration = wait(getDatabaseConfiguration(cx));
 		try {
 			wait(backupAgent->submitBackup(cx,
 			                               StringRef(backupContainer),
+			                               {},
 			                               deterministicRandom()->randomInt(0, 60),
 			                               deterministicRandom()->randomInt(0, 100),
 			                               tag.toString(),
 			                               backupRanges,
+			                               SERVER_KNOBS->ENABLE_ENCRYPTION &&
+			                                   configuration.tenantMode != TenantMode::OPTIONAL_TENANT,
 			                               StopWhenDone{ !stopDifferentialDelay },
 			                               self->usePartitionedLogs));
 		} catch (Error& e) {
@@ -238,7 +238,8 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 
 		// Stop the differential backup, if enabled
 		if (stopDifferentialDelay) {
-			TEST(!stopDifferentialFuture.isReady()); // Restore starts at specified time - stopDifferential not ready
+			CODE_PROBE(!stopDifferentialFuture.isReady(),
+			           "Restore starts at specified time - stopDifferential not ready");
 			wait(stopDifferentialFuture);
 			TraceEvent("BARW_DoBackupWaitToDiscontinue", randomID)
 			    .detail("Tag", printable(tag))
@@ -377,6 +378,7 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 				                                  cx,
 				                                  self->backupTag,
 				                                  KeyRef(lastBackupContainer),
+				                                  {},
 				                                  WaitForComplete::True,
 				                                  ::invalidVersion,
 				                                  Verbose::True,
@@ -464,24 +466,28 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 			    .detail("AbortAndRestartAfter", self->abortAndRestartAfter);
 
 			state KeyBackedTag keyBackedTag = makeBackupTag(self->backupTag.toString());
-			UidAndAbortedFlagT uidFlag = wait(keyBackedTag.getOrThrow(cx));
+			UidAndAbortedFlagT uidFlag = wait(keyBackedTag.getOrThrow(cx.getReference()));
 			state UID logUid = uidFlag.first;
-			state Key destUidValue = wait(BackupConfig(logUid).destUidValue().getD(cx));
+			state Key destUidValue = wait(BackupConfig(logUid).destUidValue().getD(cx.getReference()));
 			state Reference<IBackupContainer> lastBackupContainer =
-			    wait(BackupConfig(logUid).backupContainer().getD(cx));
+			    wait(BackupConfig(logUid).backupContainer().getD(cx.getReference()));
 
 			// Occasionally start yet another backup that might still be running when we restore
 			if (!self->locked && BUGGIFY) {
 				TraceEvent("BARW_SubmitBackup2", randomID).detail("Tag", printable(self->backupTag));
+				state DatabaseConfiguration configuration = wait(getDatabaseConfiguration(cx));
 				try {
 					// Note the "partitionedLog" must be false, because we change
 					// the configuration to disable backup workers before restore.
 					extraBackup = backupAgent.submitBackup(cx,
-					                                       LiteralStringRef("file://simfdb/backups/"),
+					                                       "file://simfdb/backups/"_sr,
+					                                       {},
 					                                       deterministicRandom()->randomInt(0, 60),
 					                                       deterministicRandom()->randomInt(0, 100),
 					                                       self->backupTag.toString(),
 					                                       self->backupRanges,
+					                                       SERVER_KNOBS->ENABLE_ENCRYPTION &&
+					                                           configuration.tenantMode != TenantMode::OPTIONAL_TENANT,
 					                                       StopWhenDone::True,
 					                                       UsePartitionedLog::False);
 				} catch (Error& e) {
@@ -493,7 +499,7 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 				}
 			}
 
-			TEST(!startRestore.isReady()); // Restore starts at specified time
+			CODE_PROBE(!startRestore.isReady(), "Restore starts at specified time");
 			wait(startRestore);
 
 			if (lastBackupContainer && self->performRestore) {
@@ -507,7 +513,7 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 
 				// We must ensure no backup workers are running, otherwise the clear DB
 				// below can be picked up by backup workers and applied during restore.
-				wait(success(changeConfig(cx, "backup_worker_enabled:=0", true)));
+				wait(success(ManagementAPI::changeConfig(cx.getReference(), "backup_worker_enabled:=0", true)));
 
 				// Clear DB before restore
 				wait(runRYWTransaction(cx, [=](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
@@ -523,7 +529,8 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 				    .detail("BackupTag", printable(self->backupTag));
 				// start restoring
 
-				auto container = IBackupContainer::openContainer(lastBackupContainer->getURL());
+				auto container =
+				    IBackupContainer::openContainer(lastBackupContainer->getURL(), lastBackupContainer->getProxy(), {});
 				BackupDescription desc = wait(container->describeBackup());
 				ASSERT(self->usePartitionedLogs == desc.partitioned);
 				ASSERT(desc.minRestorableVersion.present()); // We must have a valid backup now.
@@ -566,6 +573,7 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 				                                       self->backupTag,
 				                                       self->backupRanges,
 				                                       KeyRef(lastBackupContainer->getURL()),
+				                                       lastBackupContainer->getProxy(),
 				                                       targetVersion,
 				                                       self->locked,
 				                                       randomID,
@@ -760,7 +768,7 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 			}
 
 			if (displaySystemKeys) {
-				wait(TaskBucket::debugPrintRange(cx, LiteralStringRef("\xff"), StringRef()));
+				wait(TaskBucket::debugPrintRange(cx, "\xff"_sr, StringRef()));
 			}
 
 			TraceEvent("BARW_Complete", randomID).detail("BackupTag", printable(self->backupTag));
@@ -771,9 +779,9 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 			}
 
 			// SOMEDAY: Remove after backup agents can exist quiescently
-			if ((g_simulator.backupAgents == ISimulator::BackupAgentType::BackupToFile) &&
+			if ((g_simulator->backupAgents == ISimulator::BackupAgentType::BackupToFile) &&
 			    (!BackupAndParallelRestoreCorrectnessWorkload::backupAgentRequests)) {
-				g_simulator.backupAgents = ISimulator::BackupAgentType::NoBackupAgents;
+				g_simulator->backupAgents = ISimulator::BackupAgentType::NoBackupAgents;
 			}
 		} catch (Error& e) {
 			TraceEvent(SevError, "BackupAndParallelRestoreCorrectness").error(e).GetLastError();
@@ -785,5 +793,4 @@ struct BackupAndParallelRestoreCorrectnessWorkload : TestWorkload {
 
 int BackupAndParallelRestoreCorrectnessWorkload::backupAgentRequests = 0;
 
-WorkloadFactory<BackupAndParallelRestoreCorrectnessWorkload> BackupAndParallelRestoreCorrectnessWorkloadFactory(
-    "BackupAndParallelRestoreCorrectness");
+WorkloadFactory<BackupAndParallelRestoreCorrectnessWorkload> BackupAndParallelRestoreCorrectnessWorkloadFactory;

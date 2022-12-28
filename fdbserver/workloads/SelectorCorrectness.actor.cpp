@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,25 +25,25 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct SelectorCorrectnessWorkload : TestWorkload {
+	static constexpr auto NAME = "SelectorCorrectness";
+
 	int minOperationsPerTransaction, maxOperationsPerTransaction, maxKeySpace, maxOffset;
 	bool testReadYourWrites;
 	double testDuration;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, retries;
 
 	SelectorCorrectnessWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries") {
 
-		minOperationsPerTransaction = getOption(options, LiteralStringRef("minOperationsPerTransaction"), 10);
-		maxOperationsPerTransaction = getOption(options, LiteralStringRef("minOperationsPerTransaction"), 50);
-		maxKeySpace = getOption(options, LiteralStringRef("maxKeySpace"), 10);
-		maxOffset = getOption(options, LiteralStringRef("maxOffset"), 20);
-		testReadYourWrites = getOption(options, LiteralStringRef("testReadYourWrites"), true);
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
+		minOperationsPerTransaction = getOption(options, "minOperationsPerTransaction"_sr, 10);
+		maxOperationsPerTransaction = getOption(options, "minOperationsPerTransaction"_sr, 50);
+		maxKeySpace = getOption(options, "maxKeySpace"_sr, 10);
+		maxOffset = getOption(options, "maxOffset"_sr, 20);
+		testReadYourWrites = getOption(options, "testReadYourWrites"_sr, true);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
 	}
-
-	std::string description() const override { return "SelectorCorrectness"; }
 
 	Future<Void> setup(Database const& cx) override { return SelectorCorrectnessSetup(cx->clone(), this); }
 
@@ -57,7 +57,7 @@ struct SelectorCorrectnessWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
 	}
@@ -117,8 +117,6 @@ struct SelectorCorrectnessWorkload : TestWorkload {
 
 			state Transaction tr(cx);
 			state ReadYourWritesTransaction trRYOW(cx);
-
-			trRYOW.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
 
 			if (self->testReadYourWrites) {
 				myValue = StringRef(format("%010d", deterministicRandom()->randomInt(0, 10000000)));
@@ -247,4 +245,4 @@ struct SelectorCorrectnessWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<SelectorCorrectnessWorkload> SelectorCorrectnessWorkloadFactory("SelectorCorrectness");
+WorkloadFactory<SelectorCorrectnessWorkload> SelectorCorrectnessWorkloadFactory;

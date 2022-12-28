@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
@@ -31,25 +30,23 @@ KeySelector randomizedSelector(const KeyRef& key, bool orEqual, int offset) {
 }
 
 struct BackgroundSelectorWorkload : TestWorkload {
+	static constexpr auto NAME = "BackgroundSelector";
 	int actorsPerClient, maxDiff, minDrift, maxDrift, resultLimit;
 	double testDuration, transactionsPerSecond;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter operations, checks, retries;
 
 	BackgroundSelectorWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), operations("Operations"), checks("Checks"), retries("Retries") {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		actorsPerClient = std::max(getOption(options, LiteralStringRef("actorsPerClient"), 1), 1);
-		maxDiff = std::max(getOption(options, LiteralStringRef("maxDiff"), 100), 2);
-		minDrift = getOption(options, LiteralStringRef("minDiff"), -10);
-		maxDrift = getOption(options, LiteralStringRef("minDiff"), 100);
-		transactionsPerSecond =
-		    getOption(options, LiteralStringRef("transactionsPerSecond"), 10.0) / (clientCount * actorsPerClient);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		actorsPerClient = std::max(getOption(options, "actorsPerClient"_sr, 1), 1);
+		maxDiff = std::max(getOption(options, "maxDiff"_sr, 100), 2);
+		minDrift = getOption(options, "minDiff"_sr, -10);
+		maxDrift = getOption(options, "minDiff"_sr, 100);
+		transactionsPerSecond = getOption(options, "transactionsPerSecond"_sr, 10.0) / (clientCount * actorsPerClient);
 		resultLimit = 10 * maxDiff;
 	}
-
-	std::string description() const override { return "BackgroundSelector"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -71,9 +68,9 @@ struct BackgroundSelectorWorkload : TestWorkload {
 		return ok;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		double duration = testDuration;
-		m.push_back(PerfMetric("Operations/sec", operations.getValue() / duration, false));
+		m.emplace_back("Operations/sec", operations.getValue() / duration, Averaged::False);
 		m.push_back(operations.getMetric());
 		m.push_back(checks.getMetric());
 		m.push_back(retries.getMetric());
@@ -219,4 +216,4 @@ struct BackgroundSelectorWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<BackgroundSelectorWorkload> BackgroundSelectorWorkloadFactory("BackgroundSelector");
+WorkloadFactory<BackgroundSelectorWorkload> BackgroundSelectorWorkloadFactory;

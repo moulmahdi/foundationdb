@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,13 +77,11 @@ bool PolicyOne::selectReplicas(Reference<LocalitySet>& fromServers,
                                std::vector<LocalityEntry> const& alsoServers,
                                std::vector<LocalityEntry>& results) {
 	int totalUsed = 0;
-	int itemsUsed = 0;
 	if (alsoServers.size()) {
 		totalUsed++;
 	} else if (fromServers->size()) {
 		auto randomEntry = fromServers->random();
 		results.push_back(randomEntry);
-		itemsUsed++;
 		totalUsed++;
 	}
 	return (totalUsed > 0);

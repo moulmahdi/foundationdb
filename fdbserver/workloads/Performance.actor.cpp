@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,16 +25,18 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct PerformanceWorkload : TestWorkload {
+	static constexpr auto NAME = "Performance";
+
 	Value probeWorkload;
 	Standalone<VectorRef<KeyValueRef>> savedOptions;
 
-	vector<PerfMetric> metrics;
-	vector<TesterInterface> testers;
+	std::vector<PerfMetric> metrics;
+	std::vector<TesterInterface> testers;
 	PerfMetric latencyBaseline, latencySaturation;
 	PerfMetric maxAchievedTPS;
 
 	PerformanceWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		probeWorkload = getOption(options, LiteralStringRef("probeWorkload"), LiteralStringRef("ReadWrite"));
+		probeWorkload = getOption(options, "probeWorkload"_sr, "ReadWrite"_sr);
 
 		// "Consume" all options and save for later tests
 		for (int i = 0; i < options.size(); i++) {
@@ -44,13 +46,12 @@ struct PerformanceWorkload : TestWorkload {
 				       i,
 				       printable(options[i].key).c_str(),
 				       printable(options[i].value).c_str());
-				options[i].value = LiteralStringRef("");
+				options[i].value = ""_sr;
 			}
 		}
 		printf("saved %d options\n", savedOptions.size());
 	}
 
-	std::string description() const override { return "PerformanceTestWorkload"; }
 	Future<Void> setup(Database const& cx) override {
 		if (!clientId)
 			return _setup(cx, this);
@@ -65,23 +66,22 @@ struct PerformanceWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		for (int i = 0; i < metrics.size(); i++)
 			m.push_back(metrics[i]);
 		if (!clientId) {
-			m.push_back(PerfMetric("Baseline Latency (average, ms)", latencyBaseline.value(), false));
-			m.push_back(PerfMetric("Saturation Transactions/sec", maxAchievedTPS.value(), false));
-			m.push_back(PerfMetric("Saturation Median Latency (average, ms)", latencySaturation.value(), false));
+			m.emplace_back("Baseline Latency (average, ms)", latencyBaseline.value(), Averaged::False);
+			m.emplace_back("Saturation Transactions/sec", maxAchievedTPS.value(), Averaged::False);
+			m.emplace_back("Saturation Median Latency (average, ms)", latencySaturation.value(), Averaged::False);
 		}
 	}
 
 	Standalone<VectorRef<VectorRef<KeyValueRef>>> getOpts(double transactionsPerSecond) {
 		Standalone<VectorRef<KeyValueRef>> options;
 		Standalone<VectorRef<VectorRef<KeyValueRef>>> opts;
-		options.push_back_deep(options.arena(), KeyValueRef(LiteralStringRef("testName"), probeWorkload));
-		options.push_back_deep(
-		    options.arena(),
-		    KeyValueRef(LiteralStringRef("transactionsPerSecond"), format("%f", transactionsPerSecond)));
+		options.push_back_deep(options.arena(), KeyValueRef("testName"_sr, probeWorkload));
+		options.push_back_deep(options.arena(),
+		                       KeyValueRef("transactionsPerSecond"_sr, format("%f", transactionsPerSecond)));
 		for (int i = 0; i < savedOptions.size(); i++) {
 			options.push_back_deep(options.arena(), savedOptions[i]);
 			printf("option [%d]: '%s'='%s'\n",
@@ -104,13 +104,13 @@ struct PerformanceWorkload : TestWorkload {
 	}
 
 	// FIXME: does not use testers which are recruited on workers
-	ACTOR Future<vector<TesterInterface>> getTesters(PerformanceWorkload* self) {
-		state vector<WorkerDetails> workers;
+	ACTOR Future<std::vector<TesterInterface>> getTesters(PerformanceWorkload* self) {
+		state std::vector<WorkerDetails> workers;
 
 		loop {
 			choose {
 				when(
-				    vector<WorkerDetails> w = wait(
+				    std::vector<WorkerDetails> w = wait(
 				        brokenPromiseToNever(self->dbInfo->get().clusterInterface.getWorkers.getReply(GetWorkersRequest(
 				            GetWorkersRequest::TESTER_CLASS_ONLY | GetWorkersRequest::NON_EXCLUDED_PROCESSES_ONLY))))) {
 					workers = w;
@@ -120,7 +120,7 @@ struct PerformanceWorkload : TestWorkload {
 			}
 		}
 
-		vector<TesterInterface> ts;
+		std::vector<TesterInterface> ts;
 		ts.reserve(workers.size());
 		for (int i = 0; i < workers.size(); i++)
 			ts.push_back(workers[i].interf.testerInterface);
@@ -131,18 +131,18 @@ struct PerformanceWorkload : TestWorkload {
 		state Standalone<VectorRef<VectorRef<KeyValueRef>>> options = self->getOpts(1000.0);
 		self->logOptions(options);
 
-		vector<TesterInterface> testers = wait(self->getTesters(self));
+		std::vector<TesterInterface> testers = wait(self->getTesters(self));
 		self->testers = testers;
 
-		TestSpec spec(LiteralStringRef("PerformanceSetup"), false, false);
+		TestSpec spec("PerformanceSetup"_sr, false, false);
 		spec.options = options;
 		spec.phases = TestWorkload::SETUP;
-		DistributedTestResults results = wait(runWorkload(cx, testers, spec));
+		DistributedTestResults results = wait(runWorkload(cx, testers, spec, Optional<TenantName>()));
 
 		return Void();
 	}
 
-	PerfMetric getNamedMetric(std::string name, vector<PerfMetric> metrics) {
+	PerfMetric getNamedMetric(std::string name, std::vector<PerfMetric> metrics) {
 		for (int i = 0; i < metrics.size(); i++) {
 			if (metrics[i].name() == name) {
 				return metrics[i];
@@ -169,13 +169,15 @@ struct PerformanceWorkload : TestWorkload {
 			}
 			state DistributedTestResults results;
 			try {
-				TestSpec spec(LiteralStringRef("PerformanceRun"), false, false);
+				TestSpec spec("PerformanceRun"_sr, false, false);
 				spec.phases = TestWorkload::EXECUTION | TestWorkload::METRICS;
 				spec.options = options;
-				DistributedTestResults r = wait(runWorkload(cx, self->testers, spec));
+				DistributedTestResults r = wait(runWorkload(cx, self->testers, spec, Optional<TenantName>()));
 				results = r;
 			} catch (Error& e) {
-				TraceEvent("PerformanceRunError").error(e, true).detail("Workload", printable(self->probeWorkload));
+				TraceEvent("PerformanceRunError")
+				    .errorUnsuppressed(e)
+				    .detail("Workload", printable(self->probeWorkload));
 				break;
 			}
 			PerfMetric tpsMetric = self->getNamedMetric("Transactions/sec", results.metrics);
@@ -227,4 +229,4 @@ struct PerformanceWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<PerformanceWorkload> PerformanceWorkloadFactory("Performance");
+WorkloadFactory<PerformanceWorkload> PerformanceWorkloadFactory;

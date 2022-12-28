@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,16 +25,16 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct LockDatabaseFrequentlyWorkload : TestWorkload {
+	static constexpr auto NAME = "LockDatabaseFrequently";
+
 	double delayBetweenLocks;
 	double testDuration;
 	PerfIntCounter lockCount{ "LockCount" };
 
 	LockDatabaseFrequentlyWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		delayBetweenLocks = getOption(options, LiteralStringRef("delayBetweenLocks"), 0.1);
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 60);
+		delayBetweenLocks = getOption(options, "delayBetweenLocks"_sr, 0.1);
+		testDuration = getOption(options, "testDuration"_sr, 60);
 	}
-
-	std::string description() const override { return "LockDatabaseFrequently"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -42,7 +42,7 @@ struct LockDatabaseFrequentlyWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (clientId == 0) {
 			m.push_back(lockCount.getMetric());
 		}
@@ -72,4 +72,4 @@ struct LockDatabaseFrequentlyWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<LockDatabaseFrequentlyWorkload> LockDatabaseFrequentlyWorkloadFactory("LockDatabaseFrequently");
+WorkloadFactory<LockDatabaseFrequentlyWorkload> LockDatabaseFrequentlyWorkloadFactory;

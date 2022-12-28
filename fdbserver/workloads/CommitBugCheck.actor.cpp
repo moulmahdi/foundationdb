@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,11 +24,10 @@
 
 // Regression tests for 2 commit related bugs
 struct CommitBugWorkload : TestWorkload {
+	static constexpr auto NAME = "CommitBug";
 	bool success;
 
 	CommitBugWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) { success = true; }
-
-	std::string description() const override { return "CommitBugWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -36,8 +35,8 @@ struct CommitBugWorkload : TestWorkload {
 
 	ACTOR Future<Void> bug1(Database cx, CommitBugWorkload* self) {
 		state Key key = StringRef(format("B1Key%d", self->clientId));
-		state Value val1 = LiteralStringRef("Value1");
-		state Value val2 = LiteralStringRef("Value2");
+		state Value val1 = "Value1"_sr;
+		state Value val2 = "Value2"_sr;
 
 		loop {
 			state Transaction tr(cx);
@@ -49,7 +48,7 @@ struct CommitBugWorkload : TestWorkload {
 					break;
 				} catch (Error& e) {
 					TraceEvent("CommitBugSetVal1Error").error(e);
-					TEST(e.code() == error_code_commit_unknown_result); // Commit unknown result
+					CODE_PROBE(e.code() == error_code_commit_unknown_result, "Commit unknown result");
 					wait(tr.onError(e));
 				}
 			}
@@ -140,7 +139,7 @@ struct CommitBugWorkload : TestWorkload {
 
 						break;
 					} else {
-						TEST(true); // Commit conflict
+						CODE_PROBE(true, "Commit conflict");
 
 						TraceEvent("CommitBug2Error").error(e).detail("AttemptedNum", i + 1);
 						wait(tr.onError(e));
@@ -154,7 +153,7 @@ struct CommitBugWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return success; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<CommitBugWorkload> CommitBugWorkloadFactory("CommitBug");
+WorkloadFactory<CommitBugWorkload> CommitBugWorkloadFactory;

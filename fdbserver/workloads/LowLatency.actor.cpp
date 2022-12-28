@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
@@ -28,6 +27,8 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct LowLatencyWorkload : TestWorkload {
+	static constexpr auto NAME = "LowLatency";
+
 	double testDuration;
 	double maxGRVLatency;
 	double maxCommitLatency;
@@ -39,15 +40,15 @@ struct LowLatencyWorkload : TestWorkload {
 
 	LowLatencyWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), operations("Operations"), retries("Retries"), ok(true) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 600.0);
-		maxGRVLatency = getOption(options, LiteralStringRef("maxGRVLatency"), 20.0);
-		maxCommitLatency = getOption(options, LiteralStringRef("maxCommitLatency"), 30.0);
-		checkDelay = getOption(options, LiteralStringRef("checkDelay"), 1.0);
-		testWrites = getOption(options, LiteralStringRef("testWrites"), true);
-		testKey = getOption(options, LiteralStringRef("testKey"), LiteralStringRef("testKey"));
+		testDuration = getOption(options, "testDuration"_sr, 600.0);
+		maxGRVLatency = getOption(options, "maxGRVLatency"_sr, 20.0);
+		maxCommitLatency = getOption(options, "maxCommitLatency"_sr, 30.0);
+		checkDelay = getOption(options, "checkDelay"_sr, 1.0);
+		testWrites = getOption(options, "testWrites"_sr, true);
+		testKey = getOption(options, "testKey"_sr, "testKey"_sr);
 	}
 
-	std::string description() const override { return "LowLatency"; }
+	void disableFailureInjectionWorkloads(std::set<std::string>& out) const override { out.insert("Attrition"); }
 
 	Future<Void> setup(Database const& cx) override {
 		if (g_network->isSimulated()) {
@@ -81,14 +82,14 @@ struct LowLatencyWorkload : TestWorkload {
 						tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
 						tr.setOption(FDBTransactionOptions::LOCK_AWARE);
 						if (doCommit) {
-							tr.set(self->testKey, LiteralStringRef(""));
+							tr.set(self->testKey, ""_sr);
 							wait(tr.commit());
 						} else {
 							wait(success(tr.getReadVersion()));
 						}
 						break;
 					} catch (Error& e) {
-						TraceEvent("LowLatencyTransactionFailed").error(e, true);
+						TraceEvent("LowLatencyTransactionFailed").errorUnsuppressed(e);
 						wait(tr.onError(e));
 						++self->retries;
 					}
@@ -105,19 +106,19 @@ struct LowLatencyWorkload : TestWorkload {
 			}
 			return Void();
 		} catch (Error& e) {
-			TraceEvent(SevError, "LowLatencyError").error(e, true);
+			TraceEvent(SevError, "LowLatencyError").errorUnsuppressed(e);
 			throw;
 		}
 	}
 
 	Future<bool> check(Database const& cx) override { return ok; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		double duration = testDuration;
-		m.push_back(PerfMetric("Operations/sec", operations.getValue() / duration, false));
+		m.emplace_back("Operations/sec", operations.getValue() / duration, Averaged::False);
 		m.push_back(operations.getMetric());
 		m.push_back(retries.getMetric());
 	}
 };
 
-WorkloadFactory<LowLatencyWorkload> LowLatencyWorkloadFactory("LowLatency");
+WorkloadFactory<LowLatencyWorkload> LowLatencyWorkloadFactory;

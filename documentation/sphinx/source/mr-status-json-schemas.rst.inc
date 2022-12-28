@@ -3,6 +3,40 @@
 .. code-block:: javascript
 
    "cluster":{
+        "storage_wiggler": {
+            "wiggle_server_ids":["0ccb4e0feddb55"],
+            "wiggle_server_addresses": ["127.0.0.1"],
+            "primary": { // primary DC storage wiggler stats
+                // One StorageServer wiggle round is considered 'complete', when all StorageServers with creationTime < T are wiggled
+               "last_round_start_datetime": "2022-04-02 00:05:05.123 +0000",
+               "last_round_start_timestamp": 1648857905.123, // when did the latest round start
+               "last_round_finish_datetime": "1970-01-01 00:00:00.000 +0000",
+               "last_round_finish_timestamp": 0, // when did the latest finished round finish
+               "smoothed_round_seconds": 1, // moving average duration of a wiggle round
+               "finished_round": 1,
+               // 1 wiggle step as 1 storage server is wiggled in the current round
+               "last_wiggle_start_datetime": "2022-04-02 00:05:05.123 +0000",
+               "last_wiggle_start_timestamp": 1648857905.123, // when did the latest wiggle step start
+               "last_wiggle_finish_datetime": "1970-01-01 00:00:00.000 +0000",
+               "last_wiggle_finish_timestamp": 0,
+               "smoothed_wiggle_seconds": 1,
+               "finished_wiggle": 1
+            },
+            "remote": { // remote DC storage wiggler stats
+               "last_round_start_datetime": "2022-04-02 00:05:05.123 +0000",
+               "last_round_start_timestamp": 1648857905.123,
+               "last_round_finish_datetime": "1970-01-01 00:00:00.000 +0000",
+               "last_round_finish_timestamp": 0,
+               "smoothed_round_seconds": 1,
+               "finished_round": 1,
+               "last_wiggle_start_datetime": "2022-04-02 00:05:05.123 +0000",
+               "last_wiggle_start_timestamp": 1648857905.123,
+               "last_wiggle_finish_datetime": "1970-01-01 00:00:00.000 +0000",
+               "last_wiggle_finish_timestamp": 0,
+               "smoothed_wiggle_seconds": 1,
+               "finished_wiggle": 1
+            }
+       },
       "layers":{
          "_valid":true,
          "_error":"some error description"
@@ -50,6 +84,9 @@
                   "kvstore_available_bytes":12341234,
                   "kvstore_free_bytes":12341234,
                   "kvstore_total_bytes":12341234,
+                  "kvstore_total_size":12341234,
+                  "kvstore_total_nodes":12341234,
+                  "kvstore_inline_keys":12341234,
                   "durable_bytes":{
                      "hz":0.0,
                      "counter":0,
@@ -208,6 +245,13 @@
                      "estimated_cost":{
                         "hz":0.0
                      }
+                  },
+                  "busiest_write_tag":{
+                     "tag": "",
+                     "fractional_cost": 0.0,
+                     "estimated_cost":{
+                        "hz":0.0
+                     }
                   }
                }
             ],
@@ -216,7 +260,8 @@
                "available_bytes":0, // an estimate of the process' fair share of the memory available to fdbservers
                "limit_bytes":0, // memory limit per process
                "unused_allocated_memory":0,
-               "used_bytes":0 // virtual memory size of the process
+               "used_bytes":0, // virtual memory size of the process
+               "rss_bytes":0 // resident memory size of the process
             },
             "messages":[
                {
@@ -226,6 +271,9 @@
                      "$enum":[
                         "file_open_error",
                         "incorrect_cluster_file_contents",
+                        "trace_log_file_write_error",
+                        "trace_log_could_not_create_file",
+                        "trace_log_writer_thread_unresponsive",
                         "process_error",
                         "io_error",
                         "io_timeout",
@@ -243,7 +291,7 @@
             "excluded":false,
             "address":"1.2.3.4:1234",
             "disk":{
-               "free_bytes":3451233456234, // an estimate of how many bytes are free to allocate to fdbservers without swapping
+               "free_bytes":3451233456234,
                "reads":{
                   "hz":0.0,
                   "counter":0,
@@ -255,7 +303,7 @@
                   "counter":0,
                   "sectors":0
                },
-               "total_bytes":123412341234 // an estimate of total physical RAM
+               "total_bytes":123412341234
             },
             "uptime_seconds":1234.2345,
             "cpu":{
@@ -285,15 +333,20 @@
             "run_loop_busy":0.2 // fraction of time the run loop was busy
          }
       },
-      "old_logs":[
+      "logs":[
          {
-            "logs":[ // this field will be absent if a value has not been explicitly set
+            "log_interfaces":[ // this field will be absent if a value has not been explicitly set
                {
                   "id":"7f8d623d0cb9966e",
                   "healthy":true,
                   "address":"1.2.3.4:1234"
                }
             ],
+            "epoch":1,
+            "current":false,
+            "begin_version":23,
+            "end_version":112315141,
+            "possibly_losing_data":true,
             "log_replication_factor":3,
             "log_write_anti_quorum":0,
             "log_fault_tolerance":2,
@@ -325,7 +378,10 @@
                   "storage_server_min_free_space_ratio",
                   "log_server_min_free_space",
                   "log_server_min_free_space_ratio",
-                  "storage_server_durability_lag"
+                  "storage_server_durability_lag",
+                  "storage_server_list_fetch_failed",
+                  "blob_worker_lag",
+                  "blob_worker_missing"
                ]
             },
             "description":"The database is not being saturated by the workload."
@@ -345,7 +401,10 @@
                   "storage_server_min_free_space_ratio",
                   "log_server_min_free_space",
                   "log_server_min_free_space_ratio",
-                  "storage_server_durability_lag"
+                  "storage_server_durability_lag",
+                  "storage_server_list_fetch_failed",
+                  "blob_worker_lag",
+                  "blob_worker_missing"
                ]
             },
             "description":"The database is not being saturated by the workload."
@@ -358,14 +417,10 @@
             "auto" : {
                 "busy_read" : 0,
                 "busy_write" : 0,
-                "count" : 0
+                "count" : 0,
+                "recommended_only":0
             },
             "manual" : {
-                "count" : 0
-            },
-            "recommend" : {
-                "busy_read" : 0,
-                "busy_write" : 0,
                 "count" : 0
             }
          },
@@ -394,12 +449,13 @@
          "seconds":1.0,
          "versions":1000000
       },
+      "active_tss_count":0,
       "degraded_processes":0,
       "database_available":true,
       "database_lock_state":{
          "locked":true,
          "lock_uid":"00000000000000000000000000000000" // Only present when database is locked
-      }
+      },
       "generation":2,
       "latency_probe":{ // all measurements are based on running sample transactions
          "read_seconds":7, // time to perform a single read
@@ -468,15 +524,22 @@
                   "database_availability_timeout",
                   "consistencycheck_suspendkey_fetch_timeout",
                   "consistencycheck_disabled",
+                  "duplicate_mutation_streams",
+                  "duplicate_mutation_fetch_timeout",
                   "primary_dc_missing",
-                  "fetch_primary_dc_timeout"
+                  "fetch_primary_dc_timeout",
+                  "fetch_storage_wiggler_stats_timeout",
+                  "fetch_consistency_scan_info_timeout"
                ]
             },
             "issues":[
                {
                   "name":{ // when not limiting
                      "$enum":[
-                        "incorrect_cluster_file_contents"
+                        "incorrect_cluster_file_contents",
+                        "trace_log_file_write_error",
+                        "trace_log_could_not_create_file",
+                        "trace_log_writer_thread_unresponsive"
                      ]
                   },
                   "description":"Cluster file contents do not match current cluster connection string. Verify cluster file is writable and has not been overwritten externally."
@@ -541,7 +604,7 @@
                "counter":0,
                "roughness":0.0
             },
-            "memory_errors":{ // measures number of proxy_memory_limit_exceeded errors
+            "memory_errors":{ // measures number of (commit/grv)_proxy_memory_limit_exceeded errors
                "hz":0.0,
                "counter":0,
                "roughness":0.0
@@ -678,9 +741,13 @@
              "ssd",
              "ssd-1",
              "ssd-2",
-             "ssd-redwood-experimental",
-             "ssd-rocksdb-experimental",
-             "memory"
+             "ssd-redwood-1-experimental",
+             "ssd-rocksdb-v1",
+             "ssd-sharded-rocksdb",
+             "memory",
+             "memory-1",
+             "memory-2",
+             "memory-radixtree-beta"
          ]},
          "tss_count":1,
          "tss_storage_engine":{
@@ -688,9 +755,13 @@
              "ssd",
              "ssd-1",
              "ssd-2",
-             "ssd-redwood-experimental",
-             "ssd-rocksdb-experimental",
-             "memory"
+             "ssd-redwood-1-experimental",
+             "ssd-rocksdb-v1",
+             "ssd-sharded-rocksdb",
+             "memory",
+             "memory-1",
+             "memory-2",
+             "memory-radixtree-beta"
          ]},
          "coordinators_count":1,
          "excluded_servers":[
@@ -700,12 +771,32 @@
             }
          ],
          "auto_commit_proxies":3,
+         "auto_grv_proxies":1,
          "auto_resolvers":1,
          "auto_logs":3,
-         "backup_worker_enabled":1,
          "commit_proxies":5, // this field will be absent if a value has not been explicitly set
+         "grv_proxies":1, // this field will be absent if a value has not been explicitly set
          "proxies":6, // this field will be absent if a value has not been explicitly set
-         "perpetual_storage_wiggle": 0
+         "backup_worker_enabled":1,
+         "perpetual_storage_wiggle": 0,
+         "perpetual_storage_wiggle_locality":"0",
+         "storage_migration_type":{
+         "$enum":[
+             "disabled",
+             "gradual",
+             "aggressive"
+         ]},
+         "tenant_mode": {
+             "$enum":[
+             "disabled",
+             "optional_experimental",
+             "required_experimental"
+         ]},
+         "encryption_at_rest_mode": {
+             "$enum":[
+             "disabled",
+             "aes_256_ctr"
+         ]}
       },
       "data":{
          "least_operating_space_bytes_log_server":0,
@@ -798,6 +889,26 @@
                "logical_core_utilization":0.4 // computed as cpu_seconds / elapsed_seconds; value may be capped at 0.5 due to hyper-threading
             }
          }
+      },
+      "metacluster" : {
+         "cluster_type" : "management",         // management, data, or standalone
+         "metacluster_name" : "metacluster1",
+         "metacluster_id" : 12345,
+         "data_cluster_name" : "data_cluster1", // data cluster only
+         "data_cluster_id" : 12346,             // data cluster only
+         "num_data_clusters": 10                // management cluster only
+      },
+      "tenants" : {
+         "num_tenants" : 1, // on data cluster, local count; on management cluster, total metacluster count
+         "num_tenant_groups" : 10,
+         "tenant_group_capacity" : 20,
+      },
+      "idempotency_ids" : {
+         "size_bytes" : 0, // An estimate of the current number of bytes used in the database to store idempotency ids.
+         "expired_version" : 0, // The commit status of a transaction whose commit version could be <= expired_version can no longer be determined.
+         "expired_age" : 0, // The age in seconds of expired_version.
+         "oldest_id_version" : 0, // The version of the oldest idempotency id still stored in the database.
+         "oldest_id_age" : 0 // The age in seconds of the oldest_id_version.
       }
    },
    "client":{
@@ -805,7 +916,8 @@
          "coordinators":[
             {
                "reachable":true,
-               "address":"127.0.0.1:4701"
+               "address":"127.0.0.1:4701",
+               "protocol":"0fdb00b070010001"
             }
          ],
          "quorum_reachable":true

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct DDMetricsExcludeWorkload : TestWorkload {
+	static constexpr auto NAME = "DDMetricsExclude";
 	double ddDone;
 	Value excludeIp;
 	int excludePort;
@@ -38,8 +39,8 @@ struct DDMetricsExcludeWorkload : TestWorkload {
 	DDMetricsExcludeWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), ddDone(0.0), peakMovingData(0.0), peakInQueue(0.0), peakInFlight(0.0),
 	    movingDataPerSec(0.0) {
-		excludeIp = getOption(options, LiteralStringRef("excludeIp"), Value(LiteralStringRef("127.0.0.1")));
-		excludePort = getOption(options, LiteralStringRef("excludePort"), 4500);
+		excludeIp = getOption(options, "excludeIp"_sr, Value("127.0.0.1"_sr));
+		excludePort = getOption(options, "excludePort"_sr, 4500);
 	}
 
 	static Value getRandomValue() {
@@ -91,7 +92,6 @@ struct DDMetricsExcludeWorkload : TestWorkload {
 		return Void();
 	}
 
-	std::string description() const override { return "Data Distribution Metrics Exclude"; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override { return _start(cx, this); }
 	Future<bool> check(Database const& cx) override {
@@ -99,13 +99,13 @@ struct DDMetricsExcludeWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
-		m.push_back(PerfMetric("peakMovingData", peakMovingData, false));
-		m.push_back(PerfMetric("peakInQueue", peakInQueue, false));
-		m.push_back(PerfMetric("peakInFlight", peakInFlight, false));
-		m.push_back(PerfMetric("DDDuration", ddDone, false));
-		m.push_back(PerfMetric("movingDataPerSec", movingDataPerSec, false));
+	void getMetrics(std::vector<PerfMetric>& m) override {
+		m.emplace_back("peakMovingData", peakMovingData, Averaged::False);
+		m.emplace_back("peakInQueue", peakInQueue, Averaged::False);
+		m.emplace_back("peakInFlight", peakInFlight, Averaged::False);
+		m.emplace_back("DDDuration", ddDone, Averaged::False);
+		m.emplace_back("movingDataPerSec", movingDataPerSec, Averaged::False);
 	}
 };
 
-WorkloadFactory<DDMetricsExcludeWorkload> DDMetricsExcludeWorkloadFactory("DDMetricsExclude");
+WorkloadFactory<DDMetricsExcludeWorkload> DDMetricsExcludeWorkloadFactory;

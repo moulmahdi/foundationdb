@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
@@ -26,34 +26,34 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct StreamingReadWorkload : TestWorkload {
+	static constexpr auto NAME = "StreamingRead";
+
 	int actorCount, keyBytes, valueBytes, readsPerTransaction, nodeCount;
 	int rangesPerTransaction;
 	bool readSequentially;
 	double testDuration, warmingDelay;
 	Value constantValue;
 
-	vector<Future<Void>> clients;
+	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, readKeys;
 	PerfIntCounter readValueBytes;
-	ContinuousSample<double> latencies;
+	DDSketch<double> latencies;
 
 	StreamingReadWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), transactions("Transactions"), readKeys("Keys Read"), readValueBytes("Value Bytes Read"),
-	    latencies(2000) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		actorCount = getOption(options, LiteralStringRef("actorCount"), 20);
-		readsPerTransaction = getOption(options, LiteralStringRef("readsPerTransaction"), 10);
-		rangesPerTransaction = getOption(options, LiteralStringRef("rangesPerTransaction"), 1);
-		nodeCount = getOption(options, LiteralStringRef("nodeCount"), 100000);
-		keyBytes = std::max(getOption(options, LiteralStringRef("keyBytes"), 16), 16);
-		valueBytes = std::max(getOption(options, LiteralStringRef("valueBytes"), 96), 16);
+	    latencies() {
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		actorCount = getOption(options, "actorCount"_sr, 20);
+		readsPerTransaction = getOption(options, "readsPerTransaction"_sr, 10);
+		rangesPerTransaction = getOption(options, "rangesPerTransaction"_sr, 1);
+		nodeCount = getOption(options, "nodeCount"_sr, 100000);
+		keyBytes = std::max(getOption(options, "keyBytes"_sr, 16), 16);
+		valueBytes = std::max(getOption(options, "valueBytes"_sr, 96), 16);
 		std::string valueFormat = "%016llx" + std::string(valueBytes - 16, '.');
-		warmingDelay = getOption(options, LiteralStringRef("warmingDelay"), 0.0);
+		warmingDelay = getOption(options, "warmingDelay"_sr, 0.0);
 		constantValue = Value(format(valueFormat.c_str(), 42));
-		readSequentially = getOption(options, LiteralStringRef("readSequentially"), false);
+		readSequentially = getOption(options, "readSequentially"_sr, false);
 	}
-
-	std::string description() const override { return "StreamingRead"; }
 
 	Future<Void> setup(Database const& cx) override {
 		return bulkSetup(cx, this, nodeCount, Promise<double>(), true, warmingDelay);
@@ -70,16 +70,17 @@ struct StreamingReadWorkload : TestWorkload {
 		return true;
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(transactions.getMetric());
 		m.push_back(readKeys.getMetric());
-		m.push_back(PerfMetric(
-		    "Bytes read/sec", (readKeys.getValue() * keyBytes + readValueBytes.getValue()) / testDuration, false));
+		m.emplace_back("Bytes read/sec",
+		               (readKeys.getValue() * keyBytes + readValueBytes.getValue()) / testDuration,
+		               Averaged::False);
 
-		m.push_back(PerfMetric("Mean Latency (ms)", 1000 * latencies.mean(), true));
-		m.push_back(PerfMetric("Median Latency (ms, averaged)", 1000 * latencies.median(), true));
-		m.push_back(PerfMetric("90% Latency (ms, averaged)", 1000 * latencies.percentile(0.90), true));
-		m.push_back(PerfMetric("98% Latency (ms, averaged)", 1000 * latencies.percentile(0.98), true));
+		m.emplace_back("Mean Latency (ms)", 1000 * latencies.mean(), Averaged::True);
+		m.emplace_back("Median Latency (ms, averaged)", 1000 * latencies.median(), Averaged::True);
+		m.emplace_back("90% Latency (ms, averaged)", 1000 * latencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% Latency (ms, averaged)", 1000 * latencies.percentile(0.98), Averaged::True);
 	}
 
 	Key keyForIndex(uint64_t index) {
@@ -149,4 +150,4 @@ struct StreamingReadWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<StreamingReadWorkload> StreamingReadWorkloadFactory("StreamingRead");
+WorkloadFactory<StreamingReadWorkload> StreamingReadWorkloadFactory;

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,22 +34,20 @@ class ConfigIncrementWorkload : public TestWorkload {
 	static KeyRef const testKnobName;
 	static Key configKey;
 
-	PerfIntCounter transactions, retries;
+	PerfIntCounter transactions, retries, commitUnknownResult;
 
-	static Key getConfigKey() {
-		Tuple tuple;
-		tuple.appendNull(); // config class
-		tuple << testKnobName;
-		return tuple.pack();
-	}
+	static Key getConfigKey() { return Tuple::makeTuple(/* config class */ nullptr, testKnobName).pack(); }
 
 	ACTOR static Future<int> get(Reference<ISingleThreadTransaction> tr) {
-		TraceEvent(SevDebug, "ConfigIncrementGet");
+		state TraceEvent te(SevDebug, "ConfigIncrementGet");
 		Optional<Value> serializedValue = wait(tr->get(getConfigKey()));
 		if (!serializedValue.present()) {
 			return 0;
 		} else {
-			return BinaryReader::fromStringRef<int>(serializedValue.get(), Unversioned());
+			Tuple t = Tuple::unpack(serializedValue.get());
+			int value = t.getInt(0);
+			te.detail("Value", value);
+			return value;
 		}
 	}
 
@@ -59,33 +57,44 @@ class ConfigIncrementWorkload : public TestWorkload {
 	}
 
 	ACTOR static Future<Void> incrementActor(ConfigIncrementWorkload* self, Database cx) {
-		TraceEvent(SevDebug, "ConfigIncrementStartIncrementActor");
 		state int trsComplete = 0;
+		state Reference<ISingleThreadTransaction> tr;
+		TraceEvent(SevDebug, "ConfigIncrementStartIncrementActor");
 		while (trsComplete < self->incrementsPerActor) {
-			loop {
-				try {
-					state Reference<ISingleThreadTransaction> tr = self->getTransaction(cx);
-					state int currentValue = wait(get(tr));
-					ASSERT_GE(currentValue, self->lastKnownValue);
-					set(tr, currentValue + 1);
-					wait(delay(deterministicRandom()->random01() * 2 * self->meanSleepWithinTransactions));
-					wait(tr->commit());
-					ASSERT_GT(tr->getCommittedVersion(), self->lastKnownCommittedVersion);
-					self->lastKnownCommittedVersion = tr->getCommittedVersion();
-					self->lastKnownValue = currentValue + 1;
-					TraceEvent("ConfigIncrementSucceeded")
-					    .detail("CommittedVersion", self->lastKnownCommittedVersion)
-					    .detail("CommittedValue", self->lastKnownValue);
-					++self->transactions;
-					++trsComplete;
-					wait(delay(deterministicRandom()->random01() * 2 * self->meanSleepBetweenTransactions));
-					break;
-				} catch (Error& e) {
-					TraceEvent(SevDebug, "ConfigIncrementError")
-					    .detail("LastKnownValue", self->lastKnownValue)
-					    .error(e);
-					wait(tr->onError(e));
-					++self->retries;
+			try {
+				loop {
+					try {
+						tr = self->getTransaction(cx);
+						state int currentValue = wait(get(tr));
+						ASSERT_GE(currentValue, self->lastKnownValue);
+						set(tr, currentValue + 1);
+						wait(delay(deterministicRandom()->random01() * 2 * self->meanSleepWithinTransactions));
+						wait(tr->commit());
+						ASSERT_GT(tr->getCommittedVersion(), self->lastKnownCommittedVersion);
+						self->lastKnownCommittedVersion = tr->getCommittedVersion();
+						self->lastKnownValue = currentValue + 1;
+						TraceEvent("ConfigIncrementSucceeded")
+						    .detail("CommittedVersion", self->lastKnownCommittedVersion)
+						    .detail("CommittedValue", self->lastKnownValue);
+						++self->transactions;
+						++trsComplete;
+						wait(delay(deterministicRandom()->random01() * 2 * self->meanSleepBetweenTransactions));
+						break;
+					} catch (Error& e) {
+						TraceEvent(SevDebug, "ConfigIncrementError")
+						    .errorUnsuppressed(e)
+						    .detail("LastKnownValue", self->lastKnownValue);
+						wait(tr->onError(e));
+						++self->retries;
+					}
+				}
+			} catch (Error& e) {
+				if (e.code() == error_code_commit_unknown_result) {
+					++self->commitUnknownResult;
+					wait(delayJittered(0.1));
+					tr->reset();
+				} else {
+					throw e;
 				}
 			}
 		}
@@ -93,9 +102,11 @@ class ConfigIncrementWorkload : public TestWorkload {
 	}
 
 	ACTOR static Future<bool> check(ConfigIncrementWorkload* self, Database cx) {
-		state Reference<ISingleThreadTransaction> tr = self->getTransaction(cx);
+		state Reference<ISingleThreadTransaction> tr;
 		loop {
+			tr.clear();
 			try {
+				tr = self->getTransaction(cx);
 				state int currentValue = wait(get(tr));
 				auto expectedValue = self->incrementActors * self->incrementsPerActor;
 				TraceEvent("ConfigIncrementCheck")
@@ -110,22 +121,22 @@ class ConfigIncrementWorkload : public TestWorkload {
 
 	Reference<ISingleThreadTransaction> getTransaction(Database cx) const {
 		ASSERT(g_network->isSimulated()); // TODO: Enforce elsewhere
-		ASSERT(g_simulator.configDBType != ConfigDBType::DISABLED);
-		auto type = (g_simulator.configDBType == ConfigDBType::SIMPLE) ? ISingleThreadTransaction::Type::SIMPLE_CONFIG
-		                                                               : ISingleThreadTransaction::Type::PAXOS_CONFIG;
+		ASSERT(g_simulator->configDBType != ConfigDBType::DISABLED);
+		auto type = (g_simulator->configDBType == ConfigDBType::SIMPLE) ? ISingleThreadTransaction::Type::SIMPLE_CONFIG
+		                                                                : ISingleThreadTransaction::Type::PAXOS_CONFIG;
 		return ISingleThreadTransaction::create(type, cx);
 	}
 
 public:
+	static constexpr auto NAME = "ConfigIncrement";
 	ConfigIncrementWorkload(WorkloadContext const& wcx)
-	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries") {
+	  : TestWorkload(wcx), transactions("Transactions"), retries("Retries"),
+	    commitUnknownResult("CommitUnknownResult") {
 		incrementActors = getOption(options, "incrementActors"_sr, 10);
 		incrementsPerActor = getOption(options, "incrementsPerActor"_sr, 10);
 		meanSleepWithinTransactions = getOption(options, "meanSleepWithinTransactions"_sr, 0.01);
 		meanSleepBetweenTransactions = getOption(options, "meanSleepBetweenTransactions"_sr, 0.1);
 	}
-
-	std::string description() const override { return "ConfigIncrementWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -144,9 +155,11 @@ public:
 	void getMetrics(std::vector<PerfMetric>& m) override {
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
+		m.push_back(commitUnknownResult.getMetric());
+		m.emplace_back("Last Known Value", lastKnownValue, Averaged::False);
 	}
 };
 
-WorkloadFactory<ConfigIncrementWorkload> ConfigIncrementWorkloadFactory("ConfigIncrement");
+WorkloadFactory<ConfigIncrementWorkload> ConfigIncrementWorkloadFactory;
 
 KeyRef const ConfigIncrementWorkload::testKnobName = "test_int"_sr;

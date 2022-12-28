@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,14 +30,12 @@ struct TagThrottleApiWorkload : TestWorkload {
 	bool autoThrottleEnabled;
 	double testDuration;
 
-	constexpr static const char* NAME = "TagThrottleApi";
+	constexpr static auto NAME = "TagThrottleApi";
 
 	TagThrottleApiWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
 		autoThrottleEnabled = SERVER_KNOBS->AUTO_TAG_THROTTLING_ENABLED;
 	}
-
-	std::string description() const override { return TagThrottleApiWorkload::NAME; }
 
 	Future<Void> setup(Database const& cx) override {
 		DatabaseContext::debugUseTags = true;
@@ -45,14 +43,14 @@ struct TagThrottleApiWorkload : TestWorkload {
 	}
 
 	Future<Void> start(Database const& cx) override {
-		if (this->clientId != 0)
+		if (SERVER_KNOBS->GLOBAL_TAG_THROTTLING || this->clientId != 0)
 			return Void();
 		return timeout(runThrottleApi(this, cx), testDuration, Void());
 	}
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	static Optional<TagThrottleType> randomTagThrottleType() {
 		Optional<TagThrottleType> throttleType;
@@ -271,4 +269,4 @@ struct TagThrottleApiWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<TagThrottleApiWorkload> TagThrottleApiWorkloadFactory(TagThrottleApiWorkload::NAME);
+WorkloadFactory<TagThrottleApiWorkload> TagThrottleApiWorkloadFactory;

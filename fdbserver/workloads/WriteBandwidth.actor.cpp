@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 
 #include <boost/lexical_cast.hpp>
 
-#include "fdbrpc/ContinuousSample.h"
+#include "fdbrpc/DDSketch.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/WorkerInterface.actor.h"
@@ -29,26 +29,27 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct WriteBandwidthWorkload : KVWorkload {
+	static constexpr auto NAME = "WriteBandwidth";
+
 	int keysPerTransaction;
 	double testDuration, warmingDelay, loadTime, maxInsertRate;
 	std::string valueString;
 
 	std::vector<Future<Void>> clients;
 	PerfIntCounter transactions, retries;
-	ContinuousSample<double> commitLatencies, GRVLatencies;
+	DDSketch<double> commitLatencies, GRVLatencies;
 
 	WriteBandwidthWorkload(WorkloadContext const& wcx)
-	  : KVWorkload(wcx), loadTime(0.0), transactions("Transactions"), retries("Retries"), commitLatencies(2000),
-	    GRVLatencies(2000) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		keysPerTransaction = getOption(options, LiteralStringRef("keysPerTransaction"), 100);
+	  : KVWorkload(wcx), loadTime(0.0), transactions("Transactions"), retries("Retries"), commitLatencies(),
+	    GRVLatencies() {
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		keysPerTransaction = getOption(options, "keysPerTransaction"_sr, 100);
 		valueString = std::string(maxValueBytes, '.');
 
-		warmingDelay = getOption(options, LiteralStringRef("warmingDelay"), 0.0);
-		maxInsertRate = getOption(options, LiteralStringRef("maxInsertRate"), 1e12);
+		warmingDelay = getOption(options, "warmingDelay"_sr, 0.0);
+		maxInsertRate = getOption(options, "maxInsertRate"_sr, 1e12);
 	}
 
-	std::string description() const override { return "WriteBandwidth"; }
 	Future<Void> setup(Database const& cx) override { return _setup(cx, this); }
 	Future<Void> start(Database const& cx) override { return _start(cx, this); }
 
@@ -57,27 +58,28 @@ struct WriteBandwidthWorkload : KVWorkload {
 	void getMetrics(std::vector<PerfMetric>& m) override {
 		double duration = testDuration;
 		int writes = transactions.getValue() * keysPerTransaction;
-		m.emplace_back("Measured Duration", duration, true);
-		m.emplace_back("Transactions/sec", transactions.getValue() / duration, false);
-		m.emplace_back("Operations/sec", writes / duration, false);
+		m.emplace_back("Measured Duration", duration, Averaged::True);
+		m.emplace_back("Transactions/sec", transactions.getValue() / duration, Averaged::False);
+		m.emplace_back("Operations/sec", writes / duration, Averaged::False);
 		m.push_back(transactions.getMetric());
 		m.push_back(retries.getMetric());
-		m.emplace_back("Mean load time (seconds)", loadTime, true);
-		m.emplace_back("Write rows", writes, false);
+		m.emplace_back("Mean load time (seconds)", loadTime, Averaged::True);
+		m.emplace_back("Write rows", writes, Averaged::False);
 
-		m.emplace_back("Mean GRV Latency (ms)", 1000 * GRVLatencies.mean(), true);
-		m.emplace_back("Median GRV Latency (ms, averaged)", 1000 * GRVLatencies.median(), true);
-		m.emplace_back("90% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.90), true);
-		m.emplace_back("98% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.98), true);
+		m.emplace_back("Mean GRV Latency (ms)", 1000 * GRVLatencies.mean(), Averaged::True);
+		m.emplace_back("Median GRV Latency (ms, averaged)", 1000 * GRVLatencies.median(), Averaged::True);
+		m.emplace_back("90% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% GRV Latency (ms, averaged)", 1000 * GRVLatencies.percentile(0.98), Averaged::True);
 
-		m.emplace_back("Mean Commit Latency (ms)", 1000 * commitLatencies.mean(), true);
-		m.emplace_back("Median Commit Latency (ms, averaged)", 1000 * commitLatencies.median(), true);
-		m.emplace_back("90% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.90), true);
-		m.emplace_back("98% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.98), true);
+		m.emplace_back("Mean Commit Latency (ms)", 1000 * commitLatencies.mean(), Averaged::True);
+		m.emplace_back("Median Commit Latency (ms, averaged)", 1000 * commitLatencies.median(), Averaged::True);
+		m.emplace_back("90% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.90), Averaged::True);
+		m.emplace_back("98% Commit Latency (ms, averaged)", 1000 * commitLatencies.percentile(0.98), Averaged::True);
 
-		m.emplace_back("Write rows/sec", writes / duration, false);
-		m.emplace_back(
-		    "Bytes written/sec", (writes * (keyBytes + (minValueBytes + maxValueBytes) * 0.5)) / duration, false);
+		m.emplace_back("Write rows/sec", writes / duration, Averaged::False);
+		m.emplace_back("Bytes written/sec",
+		               (writes * (keyBytes + (minValueBytes + maxValueBytes) * 0.5)) / duration,
+		               Averaged::False);
 	}
 
 	Value randomValue() {
@@ -138,4 +140,4 @@ struct WriteBandwidthWorkload : KVWorkload {
 	}
 };
 
-WorkloadFactory<WriteBandwidthWorkload> WriteBandwidthWorkloadFactory("WriteBandwidth");
+WorkloadFactory<WriteBandwidthWorkload> WriteBandwidthWorkloadFactory;

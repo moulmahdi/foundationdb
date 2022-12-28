@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,38 +18,54 @@
  * limitations under the License.
  */
 
+#include "fdbclient/FDBOptions.g.h"
 #include "fdbrpc/simulator.h"
 #include "fdbclient/StorageServerInterface.h"
 #include "fdbclient/ManagementAPI.actor.h"
 #include "fdbserver/MoveKeys.actor.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
+#include "fdbserver/Knobs.h"
 #include "fdbserver/ServerDBInfo.h"
 #include "fdbserver/QuietDatabase.h"
+#include "flow/DeterministicRandom.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-struct MoveKeysWorkload : TestWorkload {
+struct MoveKeysWorkload : FailureInjectionWorkload {
+	static constexpr auto NAME = "RandomMoveKeys";
+
 	bool enabled;
-	double testDuration, meanDelay;
-	double maxKeyspace;
+	double testDuration = 10.0, meanDelay = 0.05;
+	double maxKeyspace = 0.1;
 	DatabaseConfiguration configuration;
 
-	MoveKeysWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
+	MoveKeysWorkload(WorkloadContext const& wcx, NoOptions) : FailureInjectionWorkload(wcx) {
 		enabled = !clientId && g_network->isSimulated(); // only do this on the "first" client
-		meanDelay = getOption(options, LiteralStringRef("meanDelay"), 0.05);
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		maxKeyspace = getOption(options, LiteralStringRef("maxKeyspace"), 0.1);
 	}
 
-	std::string description() const override { return "MoveKeysWorkload"; }
+	MoveKeysWorkload(WorkloadContext const& wcx) : FailureInjectionWorkload(wcx) {
+		enabled = !clientId && g_network->isSimulated(); // only do this on the "first" client
+		meanDelay = getOption(options, "meanDelay"_sr, meanDelay);
+		testDuration = getOption(options, "testDuration"_sr, testDuration);
+		maxKeyspace = getOption(options, "maxKeyspace"_sr, maxKeyspace);
+	}
+
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override { return _start(cx, this); }
+
+	bool shouldInject(DeterministicRandom& random,
+	                  const WorkloadRequest& work,
+	                  const unsigned alreadyAdded) const override {
+		return alreadyAdded < 1 && work.useDatabase && 0.1 / (1 + alreadyAdded) > random.random01();
+	}
 
 	ACTOR Future<Void> _start(Database cx, MoveKeysWorkload* self) {
 		if (self->enabled) {
 			// Get the database configuration so as to use proper team size
 			state Transaction tr(cx);
 			loop {
+				tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
+				tr.setOption(FDBTransactionOptions::READ_LOCK_AWARE);
 				try {
 					RangeResult res = wait(tr.getRange(configKeys, 1000));
 					ASSERT(res.size() < 1000);
@@ -77,7 +93,7 @@ struct MoveKeysWorkload : TestWorkload {
 	Future<bool> check(Database const& cx) override {
 		return tag(delay(testDuration / 2), true);
 	} // Give the database time to recover from our damage
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	KeyRange getRandomKeys() const {
 		double len = deterministicRandom()->random01() * this->maxKeyspace;
@@ -85,7 +101,8 @@ struct MoveKeysWorkload : TestWorkload {
 		return KeyRangeRef(doubleToTestKey(pos), doubleToTestKey(pos + len));
 	}
 
-	vector<StorageServerInterface> getRandomTeam(vector<StorageServerInterface> storageServers, int teamSize) {
+	std::vector<StorageServerInterface> getRandomTeam(std::vector<StorageServerInterface> storageServers,
+	                                                  int teamSize) {
 		if (storageServers.size() < teamSize) {
 			TraceEvent(SevWarnAlways, "LessThanThreeStorageServers").log();
 			throw operation_failed();
@@ -109,13 +126,13 @@ struct MoveKeysWorkload : TestWorkload {
 			throw operation_failed();
 		}
 
-		return vector<StorageServerInterface>(t.begin(), t.end());
+		return std::vector<StorageServerInterface>(t.begin(), t.end());
 	}
 
 	ACTOR Future<Void> doMoveKeys(Database cx,
 	                              MoveKeysWorkload* self,
 	                              KeyRange keys,
-	                              vector<StorageServerInterface> destinationTeam,
+	                              std::vector<StorageServerInterface> destinationTeam,
 	                              MoveKeysLock lock) {
 		state TraceInterval relocateShardInterval("RelocateShard");
 		state FlowLock fl1(1);
@@ -124,7 +141,7 @@ struct MoveKeysWorkload : TestWorkload {
 		for (int s = 0; s < destinationTeam.size(); s++)
 			desc +=
 			    format("%s (%llx),", destinationTeam[s].address().toString().c_str(), destinationTeam[s].id().first());
-		vector<UID> destinationTeamIDs;
+		std::vector<UID> destinationTeamIDs;
 		destinationTeamIDs.reserve(destinationTeam.size());
 		for (int s = 0; s < destinationTeam.size(); s++)
 			destinationTeamIDs.push_back(destinationTeam[s].id());
@@ -139,26 +156,44 @@ struct MoveKeysWorkload : TestWorkload {
 		try {
 			state Promise<Void> signal;
 			state DDEnabledState ddEnabledState;
-			wait(moveKeys(cx,
-			              keys,
-			              destinationTeamIDs,
-			              destinationTeamIDs,
-			              lock,
-			              signal,
-			              &fl1,
-			              &fl2,
-			              false,
-			              relocateShardInterval.pairID,
-			              &ddEnabledState));
+			std::unique_ptr<MoveKeysParams> params;
+			if (SERVER_KNOBS->SHARD_ENCODE_LOCATION_METADATA) {
+				params = std::make_unique<MoveKeysParams>(deterministicRandom()->randomUniqueID(),
+				                                          std::vector<KeyRange>{ keys },
+				                                          destinationTeamIDs,
+				                                          destinationTeamIDs,
+				                                          lock,
+				                                          signal,
+				                                          &fl1,
+				                                          &fl2,
+				                                          false,
+				                                          relocateShardInterval.pairID,
+				                                          &ddEnabledState,
+				                                          CancelConflictingDataMoves::True);
+			} else {
+				params = std::make_unique<MoveKeysParams>(deterministicRandom()->randomUniqueID(),
+				                                          keys,
+				                                          destinationTeamIDs,
+				                                          destinationTeamIDs,
+				                                          lock,
+				                                          signal,
+				                                          &fl1,
+				                                          &fl2,
+				                                          false,
+				                                          relocateShardInterval.pairID,
+				                                          &ddEnabledState,
+				                                          CancelConflictingDataMoves::True);
+			}
+			wait(moveKeys(cx, *params));
 			TraceEvent(relocateShardInterval.end()).detail("Result", "Success");
 			return Void();
 		} catch (Error& e) {
-			TraceEvent(relocateShardInterval.end(), self->dbInfo->get().master.id()).error(e, true);
+			TraceEvent(relocateShardInterval.end(), self->dbInfo->get().master.id()).errorUnsuppressed(e);
 			throw;
 		}
 	}
 
-	static void eliminateDuplicates(vector<StorageServerInterface>& servers) {
+	static void eliminateDuplicates(std::vector<StorageServerInterface>& servers) {
 		// The real data distribution algorithm doesn't want to deal with multiple servers
 		// with the same address having keys.  So if there are two servers with the same address,
 		// don't use either one (so we don't have to find out which of them, if any, already has keys).
@@ -176,14 +211,14 @@ struct MoveKeysWorkload : TestWorkload {
 	ACTOR Future<Void> forceMasterFailure(Database cx, MoveKeysWorkload* self) {
 		ASSERT(g_network->isSimulated());
 		loop {
-			if (g_simulator.killZone(self->dbInfo->get().master.locality.zoneId(), ISimulator::Reboot, true))
+			if (g_simulator->killZone(self->dbInfo->get().master.locality.zoneId(), ISimulator::Reboot, true))
 				return Void();
 			wait(delay(1.0));
 		}
 	}
 
 	ACTOR Future<Void> worker(Database cx, MoveKeysWorkload* self) {
-		state KeyRangeMap<vector<StorageServerInterface>> inFlight;
+		state KeyRangeMap<std::vector<StorageServerInterface>> inFlight;
 		state KeyRangeActorMap inFlightActors;
 		state double lastTime = now();
 
@@ -196,18 +231,18 @@ struct MoveKeysWorkload : TestWorkload {
 		loop {
 			try {
 				state MoveKeysLock lock = wait(takeMoveKeysLock(cx, UID()));
-				state vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
+				state std::vector<StorageServerInterface> storageServers = wait(getStorageServers(cx));
 				eliminateDuplicates(storageServers);
 
 				loop {
 					wait(poisson(&lastTime, self->meanDelay));
 
 					KeyRange keys = self->getRandomKeys();
-					vector<StorageServerInterface> team =
+					std::vector<StorageServerInterface> team =
 					    self->getRandomTeam(storageServers, self->configuration.storageTeamSize);
 
 					// update both inFlightActors and inFlight key range maps, cancelling deleted RelocateShards
-					vector<KeyRange> ranges;
+					std::vector<KeyRange> ranges;
 					inFlightActors.getRangesAffectedByInsertion(keys, ranges);
 					inFlightActors.cancel(KeyRangeRef(ranges.front().begin, ranges.back().end));
 					inFlight.insert(keys, team);
@@ -226,4 +261,5 @@ struct MoveKeysWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<MoveKeysWorkload> MoveKeysWorkloadFactory("RandomMoveKeys");
+WorkloadFactory<MoveKeysWorkload> MoveKeysWorkloadFactory;
+FailureInjectorFactory<MoveKeysWorkload> MoveKeysFailureInjectionFactory;

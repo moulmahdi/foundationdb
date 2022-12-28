@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 
+#include "fdbclient/FDBOptions.g.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/workloads.actor.h"
@@ -25,18 +26,18 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct LockDatabaseWorkload : TestWorkload {
+	static constexpr auto NAME = "LockDatabase";
+
 	double lockAfter, unlockAfter;
 	bool ok;
 	bool onlyCheckLocked;
 
 	LockDatabaseWorkload(WorkloadContext const& wcx) : TestWorkload(wcx), ok(true) {
-		lockAfter = getOption(options, LiteralStringRef("lockAfter"), 0.0);
-		unlockAfter = getOption(options, LiteralStringRef("unlockAfter"), 10.0);
-		onlyCheckLocked = getOption(options, LiteralStringRef("onlyCheckLocked"), false);
+		lockAfter = getOption(options, "lockAfter"_sr, 0.0);
+		unlockAfter = getOption(options, "unlockAfter"_sr, 10.0);
+		onlyCheckLocked = getOption(options, "onlyCheckLocked"_sr, false);
 		ASSERT(unlockAfter > lockAfter);
 	}
-
-	std::string description() const override { return "LockDatabase"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -48,12 +49,13 @@ struct LockDatabaseWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return ok; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<RangeResult> lockAndSave(Database cx, LockDatabaseWorkload* self, UID lockID) {
 		state Transaction tr(cx);
 		loop {
 			try {
+				tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 				wait(lockDatabase(&tr, lockID));
 				state RangeResult data = wait(tr.getRange(normalKeys, 50000));
 				ASSERT(!data.more);
@@ -70,6 +72,7 @@ struct LockDatabaseWorkload : TestWorkload {
 		loop {
 			try {
 				tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+				tr.setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
 				Optional<Value> val = wait(tr.get(databaseLockedKey));
 				if (!val.present())
 					return Void();
@@ -110,7 +113,7 @@ struct LockDatabaseWorkload : TestWorkload {
 				self->ok = false;
 				return Void();
 			} catch (Error& e) {
-				TEST(e.code() == error_code_database_locked); // Database confirmed locked
+				CODE_PROBE(e.code() == error_code_database_locked, "Database confirmed locked");
 				wait(tr.onError(e));
 			}
 		}
@@ -129,4 +132,4 @@ struct LockDatabaseWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<LockDatabaseWorkload> LockDatabaseWorkloadFactory("LockDatabase");
+WorkloadFactory<LockDatabaseWorkload> LockDatabaseWorkloadFactory;

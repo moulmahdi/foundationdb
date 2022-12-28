@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include "flow/JsonTraceLogFormatter.h"
 #include "flow/flow.h"
 #include "flow/DeterministicRandom.h"
+#include <exception>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <cctype>
@@ -37,6 +38,7 @@
 #include "flow/EventTypes.actor.h"
 #include "flow/TDMetric.actor.h"
 #include "flow/MetricSample.h"
+#include "flow/network.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -53,6 +55,8 @@
 // 2. To avoid a historically documented but unknown crash that occurs when logging allocations
 //    during an open trace event
 thread_local int g_allocation_tracing_disabled = 1;
+unsigned tracedLines = 0;
+thread_local int failedLineOverflow = 0;
 
 ITraceLogIssuesReporter::~ITraceLogIssuesReporter() {}
 
@@ -111,6 +115,7 @@ private:
 	int64_t preopenOverflowCount;
 	std::string basename;
 	std::string logGroup;
+	std::map<std::string, std::string> universalFields;
 
 	std::string directory;
 	std::string processName;
@@ -159,11 +164,11 @@ public:
 	bool logTraceEventMetrics;
 
 	void initMetrics() {
-		SevErrorNames.init(LiteralStringRef("TraceEvents.SevError"));
-		SevWarnAlwaysNames.init(LiteralStringRef("TraceEvents.SevWarnAlways"));
-		SevWarnNames.init(LiteralStringRef("TraceEvents.SevWarn"));
-		SevInfoNames.init(LiteralStringRef("TraceEvents.SevInfo"));
-		SevDebugNames.init(LiteralStringRef("TraceEvents.SevDebug"));
+		SevErrorNames.init("TraceEvents.SevError"_sr);
+		SevWarnAlwaysNames.init("TraceEvents.SevWarnAlways"_sr);
+		SevWarnNames.init("TraceEvents.SevWarn"_sr);
+		SevInfoNames.init("TraceEvents.SevInfo"_sr);
+		SevDebugNames.init("TraceEvents.SevDebug"_sr);
 		logTraceEventMetrics = true;
 	}
 
@@ -251,7 +256,7 @@ public:
 			double getTimeEstimate() const override { return .001; }
 		};
 		void action(WriteBuffer& a) {
-			for (auto event : a.events) {
+			for (const auto& event : a.events) {
 				event.validateFormat();
 				logWriter->write(formatter->formatEvent(event));
 			}
@@ -318,7 +323,7 @@ public:
 			writer = Reference<IThreadPool>(new DummyThreadPool());
 		else
 			writer = createGenericThreadPool();
-		writer->addThread(new WriterThread(barriers, logWriter, formatter));
+		writer->addThread(new WriterThread(barriers, logWriter, formatter), "fdb-trace-log");
 
 		rollsize = rs;
 
@@ -365,6 +370,11 @@ public:
 		if (r.rolesString.size() > 0) {
 			fields.addField("Roles", r.rolesString);
 		}
+
+		for (auto const& field : universalFields) {
+			fields.addField(field.first, field.second);
+		}
+
 		fields.setAnnotated();
 	}
 
@@ -387,6 +397,24 @@ public:
 		ASSERT(!isOpen() || fields.isAnnotated());
 		eventBuffer.push_back(fields);
 		bufferLength += fields.sizeBytes();
+
+		if (g_network && g_network->isSimulated()) {
+			// Throw an error if we have queued up a large number of events in simulation. This makes it easier to
+			// diagnose cases where we get stuck in a loop logging trace events that eventually runs out of memory.
+			// Without this we would never see any trace events from that loop, and it would be more difficult to
+			// identify where the process is actually stuck.
+			if (bufferLength > 1e8) {
+				fprintf(stderr, "Trace log buffer overflow\n");
+				fprintf(stderr, "Last event: %s\n", fields.toString().c_str());
+				// Setting this to 0 avoids a recurse from the assertion trace event and also prevents a situation where
+				// we roll the trace log only to log the single assertion event when using --crash.
+				bufferLength = 0;
+				ASSERT(false);
+			}
+			if (++tracedLines > FLOW_KNOBS->MAX_TRACE_LINES && failedLineOverflow == 0) {
+				failedLineOverflow = 1; // we only want to do this once
+			}
+		}
 
 		if (trackError) {
 			latestEventCache.setLatestError(fields);
@@ -428,7 +456,9 @@ public:
 	}
 
 	ThreadFuture<Void> flush() {
-		traceEventThrottlerCache->poll();
+		if (TraceEvent::isNetworkThread()) {
+			traceEventThrottlerCache->poll();
+		}
 
 		MutexHolder hold(mutex);
 		bool roll = false;
@@ -485,25 +515,29 @@ public:
 
 	void close() {
 		if (opened) {
-			MutexHolder hold(mutex);
+			try {
+				MutexHolder hold(mutex);
 
-			// Write remaining contents
-			auto a = new WriterThread::WriteBuffer(std::move(eventBuffer));
-			loggedLength += bufferLength;
-			eventBuffer = std::vector<TraceEventFields>();
-			bufferLength = 0;
-			writer->post(a);
+				// Write remaining contents
+				auto a = new WriterThread::WriteBuffer(std::move(eventBuffer));
+				loggedLength += bufferLength;
+				eventBuffer = std::vector<TraceEventFields>();
+				bufferLength = 0;
+				writer->post(a);
 
-			auto c = new WriterThread::Close();
-			writer->post(c);
+				auto c = new WriterThread::Close();
+				writer->post(c);
 
-			ThreadFuture<Void> f(new ThreadSingleAssignmentVar<Void>);
-			barriers->push(f);
-			writer->post(new WriterThread::Barrier);
+				ThreadFuture<Void> f(new ThreadSingleAssignmentVar<Void>);
+				barriers->push(f);
+				writer->post(new WriterThread::Barrier);
 
-			f.getBlocking();
+				f.getBlocking();
 
-			opened = false;
+				opened = false;
+			} catch (const std::exception& e) {
+				fprintf(stderr, "Error closing trace file: %s\n", e.what());
+			}
 		}
 	}
 
@@ -534,6 +568,22 @@ public:
 		this->logGroup = logGroup;
 	}
 
+	void addUniversalTraceField(const std::string& name, const std::string& value) {
+		MutexHolder holder(mutex);
+		ASSERT(universalFields.count(name) == 0);
+		universalFields[name] = value;
+	}
+
+	void setLocalAddress(const NetworkAddress& addr) {
+		MutexHolder holder(mutex);
+		this->localAddress = addr;
+	}
+
+	void disposeWriter() {
+		writer->addref();
+		writer.clear();
+	}
+
 	Future<Void> pingWriterThread() {
 		auto ping = new WriterThread::Ping;
 		auto f = ping->ack.getFuture();
@@ -555,7 +605,7 @@ public:
 NetworkAddress getAddressIndex() {
 	// ahm
 	//	if( g_network->isSimulated() )
-	//		return g_simulator.getCurrentProcess()->address;
+	//		return g_simulator->getCurrentProcess()->address;
 	//	else
 	return g_network->getLocalAddress();
 }
@@ -659,15 +709,15 @@ bool traceClockSource(std::string& source) {
 
 std::string toString(ErrorKind errorKind) {
 	switch (errorKind) {
-		case ErrorKind::Unset:
-			return "Unset";
-		case ErrorKind::DiskIssue:
-			return "DiskIssue";
-		case ErrorKind::BugDetected:
-			return "BugDetected";
-		default:
-			UNSTOPPABLE_ASSERT(false);
-			return "";
+	case ErrorKind::Unset:
+		return "Unset";
+	case ErrorKind::DiskIssue:
+		return "DiskIssue";
+	case ErrorKind::BugDetected:
+		return "BugDetected";
+	default:
+		UNSTOPPABLE_ASSERT(false);
+		return "";
 	}
 }
 
@@ -775,9 +825,28 @@ void setTraceLogGroup(const std::string& logGroup) {
 	g_traceLog.setLogGroup(logGroup);
 }
 
-TraceEvent::TraceEvent() : initialized(true), enabled(false), logged(true) {}
+void addUniversalTraceField(const std::string& name, const std::string& value) {
+	g_traceLog.addUniversalTraceField(name, value);
+}
 
-TraceEvent::TraceEvent(TraceEvent&& ev) {
+void setTraceLocalAddress(const NetworkAddress& addr) {
+	g_traceLog.setLocalAddress(addr);
+}
+
+void disposeTraceFileWriter() {
+	g_traceLog.disposeWriter();
+}
+
+std::string getTraceFormatExtension() {
+	return std::string(g_traceLog.formatter->getExtension());
+}
+
+BaseTraceEvent::BaseTraceEvent() : initialized(true), enabled(false), logged(true) {}
+BaseTraceEvent::BaseTraceEvent(Severity severity, const char* type, UID id)
+  : initialized(false), enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= severity), logged(false),
+    severity(severity), type(type), id(id) {}
+
+BaseTraceEvent::BaseTraceEvent(BaseTraceEvent&& ev) {
 	enabled = ev.enabled;
 	err = ev.err;
 	fields = std::move(ev.fields);
@@ -803,7 +872,7 @@ TraceEvent::TraceEvent(TraceEvent&& ev) {
 	ev.logged = true;
 }
 
-TraceEvent& TraceEvent::operator=(TraceEvent&& ev) {
+BaseTraceEvent& BaseTraceEvent::operator=(BaseTraceEvent&& ev) {
 	// Note: still broken if ev and this are the same memory address.
 	enabled = ev.enabled;
 	err = ev.err;
@@ -840,36 +909,29 @@ Future<Void> pingTraceLogWriterThread() {
 	return g_traceLog.pingWriterThread();
 }
 
-TraceEvent::TraceEvent(const char* type, UID id)
-  : initialized(false), enabled(true), logged(false), severity(SevInfo), type(type), id(id) {
+TraceEvent::TraceEvent(const char* type, UID id) : BaseTraceEvent(SevInfo, type, id) {
 	setMaxFieldLength(0);
 	setMaxEventLength(0);
 }
-TraceEvent::TraceEvent(Severity severity, const char* type, UID id)
-  : initialized(false), enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= severity), logged(false),
-    severity(severity), type(type), id(id) {
+TraceEvent::TraceEvent(Severity severity, const char* type, UID id) : BaseTraceEvent(severity, type, id) {
 	setMaxFieldLength(0);
 	setMaxEventLength(0);
 }
-TraceEvent::TraceEvent(TraceInterval& interval, UID id)
-  : initialized(false), enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= interval.severity),
-    logged(false), severity(interval.severity), type(interval.type), id(id) {
+TraceEvent::TraceEvent(TraceInterval& interval, UID id) : BaseTraceEvent(interval.severity, interval.type, id) {
 	setMaxFieldLength(0);
 	setMaxEventLength(0);
 
 	init(interval);
 }
 TraceEvent::TraceEvent(Severity severity, TraceInterval& interval, UID id)
-  : initialized(false), enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= severity), logged(false),
-    severity(severity), type(interval.type), id(id) {
-
+  : BaseTraceEvent(severity, interval.type, id) {
 	setMaxFieldLength(0);
 	setMaxEventLength(0);
 
 	init(interval);
 }
 
-bool TraceEvent::init(TraceInterval& interval) {
+bool BaseTraceEvent::init(TraceInterval& interval) {
 	bool result = init();
 	switch (interval.count++) {
 	case 0: {
@@ -886,7 +948,7 @@ bool TraceEvent::init(TraceInterval& interval) {
 	return result;
 }
 
-bool TraceEvent::init() {
+bool BaseTraceEvent::init() {
 	ASSERT(!logged);
 	if (initialized) {
 		return enabled;
@@ -921,7 +983,7 @@ bool TraceEvent::init() {
 		detail("Severity", int(severity));
 		if (severity >= SevError) {
 			detail("ErrorKind", errorKind);
-			errorKindIndex = fields.size()-1;
+			errorKindIndex = fields.size() - 1;
 		}
 		detail("Time", "0.000000");
 		timeIndex = fields.size() - 1;
@@ -980,7 +1042,7 @@ TraceEvent& TraceEvent::errorImpl(class Error const& error, bool includeCancelle
 	return *this;
 }
 
-TraceEvent& TraceEvent::detailImpl(std::string&& key, std::string&& value, bool writeEventMetricField) {
+BaseTraceEvent& BaseTraceEvent::detailImpl(std::string&& key, std::string&& value, bool writeEventMetricField) {
 	init();
 	if (enabled) {
 		++g_allocation_tracing_disabled;
@@ -997,7 +1059,7 @@ TraceEvent& TraceEvent::detailImpl(std::string&& key, std::string&& value, bool 
 		if (maxEventLength >= 0 && fields.sizeBytes() > maxEventLength) {
 			TraceEvent(g_network && g_network->isSimulated() ? SevError : SevWarnAlways, "TraceEventOverflow")
 			    .setMaxEventLength(1000)
-			    .detail("TraceFirstBytes", fields.toString().substr(300));
+			    .detail("TraceFirstBytes", fields.toString().substr(0, 300));
 			enabled = false;
 		}
 		--g_allocation_tracing_disabled;
@@ -1005,25 +1067,25 @@ TraceEvent& TraceEvent::detailImpl(std::string&& key, std::string&& value, bool 
 	return *this;
 }
 
-void TraceEvent::setField(const char* key, int64_t value) {
+void BaseTraceEvent::setField(const char* key, int64_t value) {
 	++g_allocation_tracing_disabled;
 	tmpEventMetric->setField(key, value);
 	--g_allocation_tracing_disabled;
 }
 
-void TraceEvent::setField(const char* key, double value) {
+void BaseTraceEvent::setField(const char* key, double value) {
 	++g_allocation_tracing_disabled;
 	tmpEventMetric->setField(key, value);
 	--g_allocation_tracing_disabled;
 }
 
-void TraceEvent::setField(const char* key, const std::string& value) {
+void BaseTraceEvent::setField(const char* key, const std::string& value) {
 	++g_allocation_tracing_disabled;
 	tmpEventMetric->setField(key, Standalone<StringRef>(value));
 	--g_allocation_tracing_disabled;
 }
 
-TraceEvent& TraceEvent::detailf(std::string key, const char* valueFormat, ...) {
+BaseTraceEvent& BaseTraceEvent::detailf(std::string key, const char* valueFormat, ...) {
 	if (enabled) {
 		va_list args;
 		va_start(args, valueFormat);
@@ -1036,7 +1098,7 @@ TraceEvent& TraceEvent::detailf(std::string key, const char* valueFormat, ...) {
 	}
 	return *this;
 }
-TraceEvent& TraceEvent::detailfNoMetric(std::string&& key, const char* valueFormat, ...) {
+BaseTraceEvent& BaseTraceEvent::detailfNoMetric(std::string&& key, const char* valueFormat, ...) {
 	if (enabled) {
 		va_list args;
 		va_start(args, valueFormat);
@@ -1053,15 +1115,14 @@ TraceEvent& TraceEvent::detailfNoMetric(std::string&& key, const char* valueForm
 	return *this;
 }
 
-TraceEvent& TraceEvent::trackLatest(const std::string& trackingKey) {
+BaseTraceEvent& BaseTraceEvent::trackLatest(const std::string& trackingKey) {
 	ASSERT(!logged);
 	this->trackingKey = trackingKey;
 	ASSERT(this->trackingKey.size() != 0 && this->trackingKey[0] != '/' && this->trackingKey[0] != '\\');
 	return *this;
 }
 
-TraceEvent& TraceEvent::sample(double sampleRate, bool logSampleRate) {
-	ASSERT(!logged);
+BaseTraceEvent& TraceEvent::sample(double sampleRate, bool logSampleRate) {
 	if (enabled) {
 		if (initialized) {
 			TraceEvent(g_network && g_network->isSimulated() ? SevError : SevWarnAlways,
@@ -1080,7 +1141,7 @@ TraceEvent& TraceEvent::sample(double sampleRate, bool logSampleRate) {
 	return *this;
 }
 
-TraceEvent& TraceEvent::suppressFor(double duration, bool logSuppressedEventCount) {
+BaseTraceEvent& TraceEvent::suppressFor(double duration, bool logSuppressedEventCount) {
 	ASSERT(!logged);
 	if (enabled) {
 		if (initialized) {
@@ -1099,23 +1160,25 @@ TraceEvent& TraceEvent::suppressFor(double duration, bool logSuppressedEventCoun
 				}
 			} else {
 				TraceEvent(SevWarnAlways, "SuppressionFromNonNetworkThread").detail("Event", type);
-				detail("__InvalidSuppression__",
-				       ""); // Choosing a detail name that is unlikely to collide with other names
+				// Choosing a detail name that is unlikely to collide with other names
+				detail("__InvalidSuppression__", "");
 			}
 		}
-		init(); // we do not want any future calls on this trace event to disable it, because we have already counted it
-		        // towards our suppression budget
+
+		// we do not want any future calls on this trace event to disable it, because we have already counted it
+		// towards our suppression budget
+		init();
 	}
 
 	return *this;
 }
 
-TraceEvent &TraceEvent::setErrorKind(ErrorKind errorKind) {
+BaseTraceEvent& BaseTraceEvent::setErrorKind(ErrorKind errorKind) {
 	this->errorKind = errorKind;
 	return *this;
 }
 
-TraceEvent& TraceEvent::setMaxFieldLength(int maxFieldLength) {
+BaseTraceEvent& BaseTraceEvent::setMaxFieldLength(int maxFieldLength) {
 	ASSERT(!logged);
 	if (maxFieldLength == 0) {
 		this->maxFieldLength = FLOW_KNOBS ? FLOW_KNOBS->MAX_TRACE_FIELD_LENGTH : 495;
@@ -1130,18 +1193,23 @@ TraceEvent& TraceEvent::setMaxFieldLength(int maxFieldLength) {
 // or multiversion client setups and for multithreaded storage engines.
 thread_local uint64_t threadId = 0;
 
-void TraceEvent::setThreadId() {
+uint64_t getTraceThreadId() {
 	while (threadId == 0) {
 		threadId = deterministicRandom()->randomUInt64();
 	}
-	this->detail("ThreadID", threadId);
+
+	return threadId;
 }
 
-int TraceEvent::getMaxFieldLength() const {
+void BaseTraceEvent::setThreadId() {
+	this->detail("ThreadID", getTraceThreadId());
+}
+
+int BaseTraceEvent::getMaxFieldLength() const {
 	return maxFieldLength;
 }
 
-TraceEvent& TraceEvent::setMaxEventLength(int maxEventLength) {
+BaseTraceEvent& BaseTraceEvent::setMaxEventLength(int maxEventLength) {
 	ASSERT(!logged);
 	if (maxEventLength == 0) {
 		this->maxEventLength = FLOW_KNOBS ? FLOW_KNOBS->MAX_TRACE_EVENT_LENGTH : 4000;
@@ -1152,11 +1220,11 @@ TraceEvent& TraceEvent::setMaxEventLength(int maxEventLength) {
 	return *this;
 }
 
-int TraceEvent::getMaxEventLength() const {
+int BaseTraceEvent::getMaxEventLength() const {
 	return maxEventLength;
 }
 
-TraceEvent& TraceEvent::GetLastError() {
+BaseTraceEvent& BaseTraceEvent::GetLastError() {
 #ifdef _WIN32
 	return detailf("WinErrorCode", "%x", ::GetLastError());
 #elif defined(__unixish__)
@@ -1164,21 +1232,21 @@ TraceEvent& TraceEvent::GetLastError() {
 #endif
 }
 
-unsigned long TraceEvent::eventCounts[NUM_MAJOR_LEVELS_OF_EVENTS] = { 0, 0, 0, 0, 0 };
+unsigned long BaseTraceEvent::eventCounts[NUM_MAJOR_LEVELS_OF_EVENTS] = { 0, 0, 0, 0, 0 };
 
-unsigned long TraceEvent::CountEventsLoggedAt(Severity sev) {
+unsigned long BaseTraceEvent::CountEventsLoggedAt(Severity sev) {
 	ASSERT(sev <= SevMaxUsed);
 	return TraceEvent::eventCounts[sev / 10];
 }
 
-TraceEvent& TraceEvent::backtrace(const std::string& prefix) {
+BaseTraceEvent& BaseTraceEvent::backtrace(const std::string& prefix) {
 	ASSERT(!logged);
 	if (this->severity == SevError || !enabled)
 		return *this; // We'll backtrace this later in ~TraceEvent
 	return detail(prefix + "Backtrace", platform::get_backtrace());
 }
 
-void TraceEvent::log() {
+void BaseTraceEvent::log() {
 	if (!logged) {
 		init();
 		++g_allocation_tracing_disabled;
@@ -1224,7 +1292,7 @@ void TraceEvent::log() {
 				}
 			}
 		} catch (Error& e) {
-			TraceEvent(SevError, "TraceEventLoggingError").error(e, true);
+			TraceEvent(SevError, "TraceEventLoggingError").errorUnsuppressed(e);
 		}
 		tmpEventMetric.reset();
 		logged = true;
@@ -1232,15 +1300,24 @@ void TraceEvent::log() {
 	}
 }
 
-TraceEvent::~TraceEvent() {
+BaseTraceEvent::~BaseTraceEvent() {
 	log();
+	if (failedLineOverflow == 1) {
+		failedLineOverflow = 2;
+		TraceEvent(SevError, "TracedTooManyLines").log();
+		crashAndDie();
+	}
 }
 
-thread_local bool TraceEvent::networkThread = false;
+thread_local bool BaseTraceEvent::networkThread = false;
 
-void TraceEvent::setNetworkThread() {
+void BaseTraceEvent::setNetworkThread() {
 	if (!networkThread) {
 		if (FLOW_KNOBS->ALLOCATION_TRACING_ENABLED) {
+			// Ensure that threadId is initialized before we enable allocation tracing, otherwise it would
+			// be initialized either by first normal usage of TraceEvent or by allocation tracing which is
+			// non-deterministic, and we could run into https://github.com/apple/foundationdb/issues/7872.
+			getTraceThreadId();
 			--g_allocation_tracing_disabled;
 		}
 
@@ -1250,11 +1327,11 @@ void TraceEvent::setNetworkThread() {
 	}
 }
 
-bool TraceEvent::isNetworkThread() {
+bool BaseTraceEvent::isNetworkThread() {
 	return networkThread;
 }
 
-double TraceEvent::getCurrentTime() {
+double BaseTraceEvent::getCurrentTime() {
 	if (g_trace_clock.load() == TRACE_CLOCK_NOW) {
 		if (!isNetworkThread() || !g_network) {
 			return timer_monotonic();
@@ -1271,7 +1348,7 @@ double TraceEvent::getCurrentTime() {
 // This only has second-resolution for the simple reason
 // that std::put_time does not support higher resolution.
 // This is fine since we always log the flow time as well.
-std::string TraceEvent::printRealTime(double time) {
+std::string BaseTraceEvent::printRealTime(double time) {
 	using Clock = std::chrono::system_clock;
 	time_t ts = Clock::to_time_t(Clock::time_point(
 	    std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::ratio<1>>(time))));
@@ -1292,7 +1369,9 @@ std::string TraceEvent::printRealTime(double time) {
 }
 
 TraceInterval& TraceInterval::begin() {
-	pairID = nondeterministicRandom()->randomUniqueID();
+	if (!pairID.isValid()) {
+		pairID = nondeterministicRandom()->randomUniqueID();
+	}
 	count = 0;
 	return *this;
 }
@@ -1368,7 +1447,7 @@ void TraceBatch::dump() {
 		g_traceLog.writeEvent(buggifyBatch[i].fields, "", false);
 	}
 
-	onMainThreadVoid([]() { g_traceLog.flush(); }, nullptr);
+	onMainThreadVoid([]() { g_traceLog.flush(); });
 	eventBatch.clear();
 	attachBatch.clear();
 	buggifyBatch.clear();
@@ -1521,40 +1600,87 @@ void parseNumericValue(std::string const& s, int64_t& outValue, bool permissive 
 	throw attribute_not_found();
 }
 
-template <class T>
-T getNumericValue(TraceEventFields const& fields, std::string key, bool permissive) {
+void parseNumericValue(std::string const& s, uint64_t& outValue, bool permissive = false) {
+	unsigned long long int i = 0;
+	int consumed = 0;
+	int r = sscanf(s.c_str(), "%llu%n", &i, &consumed);
+	if (r == 1 && (consumed == s.size() || permissive)) {
+		outValue = i;
+		return;
+	}
+
+	throw attribute_not_found();
+}
+
+template <class T, bool tryError>
+bool getNumericValue(TraceEventFields const& fields, std::string key, T& outValue, bool permissive) {
 	std::string field = fields.getValue(key);
 
 	try {
-		T value;
-		parseNumericValue(field, value, permissive);
-		return value;
+		parseNumericValue(field, outValue, permissive);
+		return true;
 	} catch (Error& e) {
-		std::string type;
+		if (tryError) {
+			std::string type;
 
-		TraceEvent ev(SevWarn, "ErrorParsingNumericTraceEventField");
-		ev.error(e);
-		if (fields.tryGetValue("Type", type)) {
-			ev.detail("Event", type);
+			TraceEvent ev(SevWarn, "ErrorParsingNumericTraceEventField");
+			ev.error(e);
+			if (fields.tryGetValue("Type", type)) {
+				ev.detail("Event", type);
+			}
+			ev.detail("FieldName", key);
+			ev.detail("FieldValue", field);
+
+			throw;
+		} else {
+			return false;
 		}
-		ev.detail("FieldName", key);
-		ev.detail("FieldValue", field);
-
-		throw;
 	}
 }
 } // namespace
 
+bool TraceEventFields::tryGetInt(std::string key, int& outVal, bool permissive) const {
+	bool success = getNumericValue<int, false>(*this, key, outVal, permissive);
+	return success;
+}
+
 int TraceEventFields::getInt(std::string key, bool permissive) const {
-	return getNumericValue<int>(*this, key, permissive);
+	int outVal;
+	getNumericValue<int, true>(*this, key, outVal, permissive);
+	return outVal;
+}
+
+bool TraceEventFields::tryGetInt64(std::string key, int64_t& outVal, bool permissive) const {
+	bool success = getNumericValue<int64_t, false>(*this, key, outVal, permissive);
+	return success;
 }
 
 int64_t TraceEventFields::getInt64(std::string key, bool permissive) const {
-	return getNumericValue<int64_t>(*this, key, permissive);
+	int64_t outVal;
+	getNumericValue<int64_t, true>(*this, key, outVal, permissive);
+	return outVal;
+}
+
+bool TraceEventFields::tryGetUint64(std::string key, uint64_t& outVal, bool permissive) const {
+	bool success = getNumericValue<uint64_t, false>(*this, key, outVal, permissive);
+	return success;
+}
+
+uint64_t TraceEventFields::getUint64(std::string key, bool permissive) const {
+	uint64_t outVal;
+	getNumericValue<uint64_t, true>(*this, key, outVal, permissive);
+	return outVal;
+}
+
+bool TraceEventFields::tryGetDouble(std::string key, double& outVal, bool permissive) const {
+	bool success = getNumericValue<double, false>(*this, key, outVal, permissive);
+	return success;
 }
 
 double TraceEventFields::getDouble(std::string key, bool permissive) const {
-	return getNumericValue<double>(*this, key, permissive);
+	double outVal;
+	getNumericValue<double, true>(*this, key, outVal, permissive);
+	return outVal;
 }
 
 std::string TraceEventFields::toString() const {

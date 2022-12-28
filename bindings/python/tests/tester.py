@@ -26,10 +26,10 @@ import sys
 import os
 import struct
 import threading
-import time
 import random
 import time
 import traceback
+import json
 
 sys.path[:0] = [os.path.join(os.path.dirname(__file__), '..')]
 import fdb
@@ -49,6 +49,7 @@ from cancellation_timeout_tests import test_db_retry_limits
 from cancellation_timeout_tests import test_combinations
 
 from size_limit_tests import test_size_limit_option, test_get_approximate_size
+from tenant_tests import test_tenants
 
 random.seed(0)
 
@@ -112,12 +113,13 @@ class Stack:
 
 
 class Instruction:
-    def __init__(self, tr, stack, op, index, isDatabase=False, isSnapshot=False):
+    def __init__(self, tr, stack, op, index, isDatabase=False, isTenant=False, isSnapshot=False):
         self.tr = tr
         self.stack = stack
         self.op = op
         self.index = index
         self.isDatabase = isDatabase
+        self.isTenant = isTenant
         self.isSnapshot = isSnapshot
 
     def pop(self, count=None, with_idx=False):
@@ -133,7 +135,7 @@ def test_fdb_transactional_generator(db):
         def function_that_yields(tr):
             yield 0
         assert fdb.get_api_version() < 630, "Pre-6.3, a decorator may wrap a function that yields"
-    except ValueError as e:
+    except ValueError:
         assert fdb.get_api_version() >= 630, "Post-6.3, a decorator should throw if wrapped function yields"
 
 
@@ -141,12 +143,13 @@ def test_fdb_transactional_returns_generator(db):
     try:
         def function_that_yields(tr):
             yield 0
+
         @fdb.transactional
         def function_that_returns(tr):
             return function_that_yields(tr)
         function_that_returns()
         assert fdb.get_api_version() < 630, "Pre-6.3, returning a generator is allowed"
-    except ValueError as e:
+    except ValueError:
         assert fdb.get_api_version() >= 630, "Post-6.3, returning a generator should throw"
 
 
@@ -277,6 +280,7 @@ class Tester:
 
     def __init__(self, db, prefix):
         self.db = db
+        self.tenant = None
 
         self.instructions = self.db[fdb.tuple.range((prefix,))]
 
@@ -317,7 +321,8 @@ class Tester:
 
     def new_transaction(self):
         with Tester.tr_map_lock:
-            Tester.tr_map[self.tr_name] = self.db.create_transaction()
+            tr_source = self.tenant if self.tenant is not None else self.db
+            Tester.tr_map[self.tr_name] = tr_source.create_transaction()
 
     def switch_transaction(self, name):
         self.tr_name = name
@@ -335,18 +340,22 @@ class Tester:
             #     print("%d. Instruction is %s" % (idx, op))
 
             isDatabase = op.endswith(six.u('_DATABASE'))
+            isTenant = op.endswith(six.u('_TENANT'))
             isSnapshot = op.endswith(six.u('_SNAPSHOT'))
 
             if isDatabase:
                 op = op[:-9]
                 obj = self.db
+            elif isTenant:
+                op = op[:-7]
+                obj = self.tenant if self.tenant else self.db
             elif isSnapshot:
                 op = op[:-9]
                 obj = self.current_transaction().snapshot
             else:
                 obj = self.current_transaction()
 
-            inst = Instruction(obj, self.stack, op, idx, isDatabase, isSnapshot)
+            inst = Instruction(obj, self.stack, op, idx, isDatabase, isTenant, isSnapshot)
 
             try:
                 if inst.op == six.u("PUSH"):
@@ -391,11 +400,11 @@ class Tester:
                         inst.push(f)
                 elif inst.op == six.u("GET_ESTIMATED_RANGE_SIZE"):
                     begin, end = inst.pop(2)
-                    estimatedSize = obj.get_estimated_range_size_bytes(begin, end).wait()
+                    obj.get_estimated_range_size_bytes(begin, end).wait()
                     inst.push(b"GOT_ESTIMATED_RANGE_SIZE")
                 elif inst.op == six.u("GET_RANGE_SPLIT_POINTS"):
                     begin, end, chunkSize = inst.pop(3)
-                    estimatedSize = obj.get_range_split_points(begin, end, chunkSize).wait()
+                    obj.get_range_split_points(begin, end, chunkSize).wait()
                     inst.push(b"GOT_RANGE_SPLIT_POINTS")
                 elif inst.op == six.u("GET_KEY"):
                     key, or_equal, offset, prefix = inst.pop(4)
@@ -444,7 +453,7 @@ class Tester:
                     else:
                         obj.set(key, value)
 
-                    if obj == self.db:
+                    if isDatabase or isTenant:
                         inst.push(b"RESULT_NOT_PRESENT")
                 elif inst.op == six.u("LOG_STACK"):
                     prefix = inst.pop()
@@ -461,7 +470,7 @@ class Tester:
                     opType, key, value = inst.pop(3)
                     getattr(obj, opType.lower())(key, value)
 
-                    if obj == self.db:
+                    if isDatabase or isTenant:
                         inst.push(b"RESULT_NOT_PRESENT")
                 elif inst.op == six.u("SET_READ_VERSION"):
                     inst.tr.set_read_version(self.last_version)
@@ -471,7 +480,7 @@ class Tester:
                     else:
                         obj.clear(inst.pop())
 
-                    if obj == self.db:
+                    if isDatabase or isTenant:
                         inst.push(b"RESULT_NOT_PRESENT")
                 elif inst.op == six.u("CLEAR_RANGE"):
                     begin, end = inst.pop(2)
@@ -483,11 +492,11 @@ class Tester:
                     else:
                         obj.__delitem__(slice(begin, end))
 
-                    if obj == self.db:
+                    if isDatabase or isTenant:
                         inst.push(b"RESULT_NOT_PRESENT")
                 elif inst.op == six.u("CLEAR_RANGE_STARTS_WITH"):
                     obj.clear_range_startswith(inst.pop())
-                    if obj == self.db:
+                    if isDatabase or isTenant:
                         inst.push(b"RESULT_NOT_PRESENT")
                 elif inst.op == six.u("READ_CONFLICT_RANGE"):
                     inst.tr.add_read_conflict_range(inst.pop(), inst.pop())
@@ -513,7 +522,7 @@ class Tester:
                     self.last_version = inst.tr.get_committed_version()
                     inst.push(b"GOT_COMMITTED_VERSION")
                 elif inst.op == six.u("GET_APPROXIMATE_SIZE"):
-                    approximate_size = inst.tr.get_approximate_size().wait()
+                    inst.tr.get_approximate_size().wait()
                     inst.push(b"GOT_APPROXIMATE_SIZE")
                 elif inst.op == six.u("GET_VERSIONSTAMP"):
                     inst.push(inst.tr.get_versionstamp())
@@ -583,6 +592,32 @@ class Tester:
                     prefix = inst.pop()
                     Tester.wait_empty(self.db, prefix)
                     inst.push(b"WAITED_FOR_EMPTY")
+                elif inst.op == six.u("TENANT_CREATE"):
+                    name = inst.pop()
+                    fdb.tenant_management.create_tenant(self.db, name)
+                    inst.push(b"RESULT_NOT_PRESENT")
+                elif inst.op == six.u("TENANT_DELETE"):
+                    name = inst.pop()
+                    fdb.tenant_management.delete_tenant(self.db, name)
+                    inst.push(b"RESULT_NOT_PRESENT")
+                elif inst.op == six.u("TENANT_SET_ACTIVE"):
+                    name = inst.pop()
+                    self.tenant = self.db.open_tenant(name)
+                elif inst.op == six.u("TENANT_CLEAR_ACTIVE"):
+                    self.tenant = None
+                elif inst.op == six.u("TENANT_LIST"):
+                    begin, end, limit = inst.pop(3)
+                    tenant_list = fdb.tenant_management.list_tenants(self.db, begin, end, limit)
+                    result = []
+                    for tenant in tenant_list:
+                        result += [tenant.key]
+                        try:
+                            metadata = json.loads(tenant.value)
+                            _ = metadata["id"]
+                            _ = metadata["prefix"]
+                        except (json.decoder.JSONDecodeError, KeyError):
+                            assert False, "Invalid Tenant Metadata"
+                    inst.push(fdb.tuple.pack(tuple(result)))
                 elif inst.op == six.u("UNIT_TESTS"):
                     try:
                         test_db_options(db)
@@ -599,6 +634,9 @@ class Tester:
 
                         test_size_limit_option(db)
                         test_get_approximate_size(db)
+
+                        if fdb.get_api_version() >= 710:
+                            test_tenants(db)
 
                     except fdb.FDBError as e:
                         print("Unit tests failed: %s" % e.description)

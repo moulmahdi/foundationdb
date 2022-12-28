@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,16 +18,21 @@
  * limitations under the License.
  */
 
-#include "flow/Error.h"
-#include "flow/Trace.h"
-#include "flow/Knobs.h"
-#include "flow/UnitTest.h"
 #include <iostream>
-using std::cout;
-using std::endl;
-using std::make_pair;
+
+#include "flow/Error.h"
+#include "flow/Knobs.h"
+#include "flow/Trace.h"
+#include "flow/UnitTest.h"
 
 bool g_crashOnError = false;
+
+#define DEBUG_ERROR 0
+
+#if DEBUG_ERROR
+std::set<int> debugErrorSet = std::set<int>{ error_code_platform_error };
+#define SHOULD_LOG_ERROR(x) (debugErrorSet.count(x) > 0)
+#endif
 
 #include <iostream>
 
@@ -124,6 +129,24 @@ Error::Error(int error_code) : error_code(error_code), flags(0) {
 			crashAndDie();
 		}
 	}
+
+#if DEBUG_ERROR
+	if (SHOULD_LOG_ERROR(error_code)) {
+		TraceEvent te(SevWarn, "DebugError");
+		te.error(*this).backtrace();
+		if (error_code == error_code_unknown_error) {
+			auto exception = std::current_exception();
+			if (exception) {
+				try {
+					std::rethrow_exception(exception);
+				} catch (std::exception& e) {
+					te.detail("StdException", e.what());
+				} catch (...) {
+				}
+			}
+		}
+	}
+#endif
 }
 
 ErrorCodeTable& Error::errorCodeTable() {
@@ -161,7 +184,7 @@ ErrorCodeTable::ErrorCodeTable() {
 #define ERROR(name, number, description)                                                                               \
 	addCode(number, #name, description);                                                                               \
 	enum { Duplicate_Error_Code_##number = 0 };
-#include "error_definitions.h"
+#include "flow/error_definitions.h"
 }
 
 void ErrorCodeTable::addCode(int code, const char* name, const char* description) {
@@ -175,6 +198,21 @@ bool isAssertDisabled(int line) {
 void breakpoint_me() {
 	return;
 }
+
+// FIXME: combine with bindings/c/fdb_c.cpp fdb_error_predicate function
+const std::set<int> transactionRetryableErrors = { error_code_not_committed,
+	                                               error_code_transaction_too_old,
+	                                               error_code_future_version,
+	                                               error_code_commit_proxy_memory_limit_exceeded,
+	                                               error_code_grv_proxy_memory_limit_exceeded,
+	                                               error_code_process_behind,
+	                                               error_code_batch_transaction_throttled,
+	                                               error_code_tag_throttled,
+	                                               error_code_unknown_tenant,
+	                                               error_code_proxy_tag_throttled,
+	                                               // maybe committed error
+	                                               error_code_cluster_version_changed,
+	                                               error_code_commit_unknown_result };
 
 TEST_CASE("/flow/AssertTest") {
 	// this is mostly checking bug for bug compatibility with the C integer / sign promotion rules.

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +24,6 @@
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/genericactors.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
-
-static constexpr int SAMPLE_SIZE = 10000;
 
 // If the log->storage propagation delay is longer than 1 second, then it's likely that our read
 // will see a `future_version` error from the storage server.  We need to retry the read until
@@ -48,15 +46,14 @@ ACTOR Future<double> latencyOfRead(Transaction* tr, Key k) {
 
 // Measure the latency of a storage server making a committed value available for reading.
 struct ReadAfterWriteWorkload : KVWorkload {
+	static constexpr auto NAME = "ReadAfterWrite";
 
 	double testDuration;
-	ContinuousSample<double> propagationLatency;
+	DDSketch<double> propagationLatency;
 
-	ReadAfterWriteWorkload(WorkloadContext const& wcx) : KVWorkload(wcx), propagationLatency(SAMPLE_SIZE) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
+	ReadAfterWriteWorkload(WorkloadContext const& wcx) : KVWorkload(wcx), propagationLatency() {
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
 	}
-
-	std::string description() const override { return "ReadAfterWriteWorkload"; }
 
 	Future<Void> setup(Database const& cx) override { return Void(); }
 
@@ -114,12 +111,12 @@ struct ReadAfterWriteWorkload : KVWorkload {
 	Future<bool> check(Database const& cx) override { return true; }
 
 	void getMetrics(std::vector<PerfMetric>& m) override {
-		m.emplace_back("Mean Latency (ms)", 1000 * propagationLatency.mean(), true);
-		m.emplace_back("Median Latency (ms, averaged)", 1000 * propagationLatency.median(), true);
-		m.emplace_back("90% Latency (ms, averaged)", 1000 * propagationLatency.percentile(0.90), true);
-		m.emplace_back("99% Latency (ms, averaged)", 1000 * propagationLatency.percentile(0.99), true);
-		m.emplace_back("Max Latency (ms, averaged)", 1000 * propagationLatency.max(), true);
+		m.emplace_back("Mean Latency (ms)", 1000 * propagationLatency.mean(), Averaged::True);
+		m.emplace_back("Median Latency (ms, averaged)", 1000 * propagationLatency.median(), Averaged::True);
+		m.emplace_back("90% Latency (ms, averaged)", 1000 * propagationLatency.percentile(0.90), Averaged::True);
+		m.emplace_back("99% Latency (ms, averaged)", 1000 * propagationLatency.percentile(0.99), Averaged::True);
+		m.emplace_back("Max Latency (ms, averaged)", 1000 * propagationLatency.max(), Averaged::True);
 	}
 };
 
-WorkloadFactory<ReadAfterWriteWorkload> ReadAfterWriteWorkloadFactory("ReadAfterWrite");
+WorkloadFactory<ReadAfterWriteWorkload> ReadAfterWriteWorkloadFactory;

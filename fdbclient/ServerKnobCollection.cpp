@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,4 +49,8 @@ Optional<KnobValue> ServerKnobCollection::tryParseKnobValue(std::string const& k
 
 bool ServerKnobCollection::trySetKnob(std::string const& knobName, KnobValueRef const& knobValue) {
 	return clientKnobCollection.trySetKnob(knobName, knobValue) || knobValue.visitSetKnob(knobName, serverKnobs);
+}
+
+bool ServerKnobCollection::isAtomic(std::string const& knobName) const {
+	return clientKnobCollection.isAtomic(knobName) || serverKnobs.isAtomic(knobName);
 }

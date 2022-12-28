@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@
 #include "fdbclient/TagThrottle.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-constexpr int SAMPLE_SIZE = 10000;
 // workload description:
 // This workload aims to test whether we can throttling some bad clients that doing penetrating write on write hot-spot
 // range. There are several good clientActor just randomly do read and write ops in transaction. Also, some bad
@@ -41,8 +40,8 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 	int badActorTrNum = 0, badActorRetries = 0, badActorTooOldRetries = 0, badActorCommitFailedRetries = 0;
 	int goodActorThrottleRetries = 0, badActorThrottleRetries = 0;
 	double badActorTotalLatency = 0.0, goodActorTotalLatency = 0.0;
-	ContinuousSample<double> badActorReadLatency, goodActorReadLatency;
-	ContinuousSample<double> badActorCommitLatency, goodActorCommitLatency;
+	DDSketch<double> badActorReadLatency, goodActorReadLatency;
+	DDSketch<double> badActorCommitLatency, goodActorCommitLatency;
 	// Test configuration
 	// KVWorkload::actorCount
 	int goodActorPerClient, badActorPerClient;
@@ -59,30 +58,30 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 	bool fastSuccess = false;
 	int rangeEachBadActor = 0;
 	std::set<std::string> throttledTags;
-	static constexpr const char* NAME = "WriteTagThrottling";
+	static constexpr auto NAME = "WriteTagThrottling";
 	static constexpr int MIN_TAGS_PER_TRANSACTION = 1;
 	static constexpr int MIN_TRANSACTION_TAG_LENGTH = 2;
 
 	WriteTagThrottlingWorkload(WorkloadContext const& wcx)
-	  : KVWorkload(wcx), badActorReadLatency(SAMPLE_SIZE), goodActorReadLatency(SAMPLE_SIZE),
-	    badActorCommitLatency(SAMPLE_SIZE), goodActorCommitLatency(SAMPLE_SIZE) {
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 120.0);
-		badOpRate = getOption(options, LiteralStringRef("badOpRate"), 0.9);
-		numWritePerTr = getOption(options, LiteralStringRef("numWritePerTr"), 1);
-		numReadPerTr = getOption(options, LiteralStringRef("numReadPerTr"), 1);
-		numClearPerTr = getOption(options, LiteralStringRef("numClearPerTr"), 1);
-		hotRangeRate = getOption(options, LiteralStringRef("hotRangeRate"), 0.1);
-		populateData = getOption(options, LiteralStringRef("populateData"), true);
+	  : KVWorkload(wcx), badActorReadLatency(), goodActorReadLatency(), badActorCommitLatency(),
+	    goodActorCommitLatency() {
+		testDuration = getOption(options, "testDuration"_sr, 120.0);
+		badOpRate = getOption(options, "badOpRate"_sr, 0.9);
+		numWritePerTr = getOption(options, "numWritePerTr"_sr, 1);
+		numReadPerTr = getOption(options, "numReadPerTr"_sr, 1);
+		numClearPerTr = getOption(options, "numClearPerTr"_sr, 1);
+		hotRangeRate = getOption(options, "hotRangeRate"_sr, 0.1);
+		populateData = getOption(options, "populateData"_sr, true);
 
-		writeThrottle = getOption(options, LiteralStringRef("writeThrottle"), false);
-		badActorPerClient = getOption(options, LiteralStringRef("badActorPerClient"), 1);
-		goodActorPerClient = getOption(options, LiteralStringRef("goodActorPerClient"), 1);
+		writeThrottle = getOption(options, "writeThrottle"_sr, false);
+		badActorPerClient = getOption(options, "badActorPerClient"_sr, 1);
+		goodActorPerClient = getOption(options, "goodActorPerClient"_sr, 1);
 		actorCount = goodActorPerClient + badActorPerClient;
 
 		keyCount = getOption(options,
-		                     LiteralStringRef("keyCount"),
+		                     "keyCount"_sr,
 		                     std::max(3000, clientCount * actorCount * 3)); // enough keys to avoid too many conflicts
-		trInterval = actorCount * 1.0 / getOption(options, LiteralStringRef("trPerSecond"), 1000);
+		trInterval = actorCount * 1.0 / getOption(options, "trPerSecond"_sr, 1000);
 		if (badActorPerClient > 0) {
 			rangeEachBadActor = keyCount / (clientCount * badActorPerClient);
 		}
@@ -90,8 +89,6 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 		badTag = TransactionTag(std::string("bT"));
 		goodTag = TransactionTag(std::string("gT"));
 	}
-
-	std::string description() const override { return WriteTagThrottlingWorkload::NAME; }
 
 	ACTOR static Future<Void> _setup(Database cx, WriteTagThrottlingWorkload* self) {
 		ASSERT(CLIENT_KNOBS->MAX_TAGS_PER_TRANSACTION >= MIN_TAGS_PER_TRANSACTION &&
@@ -113,7 +110,7 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 		return _setup(cx, this);
 	}
 	ACTOR static Future<Void> _start(Database cx, WriteTagThrottlingWorkload* self) {
-		vector<Future<Void>> clientActors;
+		std::vector<Future<Void>> clientActors;
 		int actorId;
 		for (actorId = 0; actorId < self->goodActorPerClient; ++actorId) {
 			clientActors.push_back(clientActor(false, actorId, 0, cx, self));
@@ -152,41 +149,42 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 		}
 		return true;
 	}
-	void getMetrics(vector<PerfMetric>& m) override {
-		m.push_back(PerfMetric("Transactions (badActor)", badActorTrNum, false));
-		m.push_back(PerfMetric("Transactions (goodActor)", goodActorTrNum, false));
-		m.push_back(PerfMetric("Avg Latency (ms, badActor)", 1000 * badActorTotalLatency / badActorTrNum, true));
-		m.push_back(PerfMetric("Avg Latency (ms, goodActor)", 1000 * goodActorTotalLatency / goodActorTrNum, true));
+	void getMetrics(std::vector<PerfMetric>& m) override {
+		m.emplace_back("Transactions (badActor)", badActorTrNum, Averaged::False);
+		m.emplace_back("Transactions (goodActor)", goodActorTrNum, Averaged::False);
+		m.emplace_back("Avg Latency (ms, badActor)", 1000 * badActorTotalLatency / badActorTrNum, Averaged::True);
+		m.emplace_back("Avg Latency (ms, goodActor)", 1000 * goodActorTotalLatency / goodActorTrNum, Averaged::True);
 
-		m.push_back(PerfMetric("Retries (badActor)", badActorRetries, false));
-		m.push_back(PerfMetric("Retries (goodActor)", goodActorRetries, false));
+		m.emplace_back("Retries (badActor)", badActorRetries, Averaged::False);
+		m.emplace_back("Retries (goodActor)", goodActorRetries, Averaged::False);
 
-		m.push_back(PerfMetric("Retries.throttle (badActor)", badActorThrottleRetries, false));
-		m.push_back(PerfMetric("Retries.throttle (goodActor)", goodActorThrottleRetries, false));
+		m.emplace_back("Retries.throttle (badActor)", badActorThrottleRetries, Averaged::False);
+		m.emplace_back("Retries.throttle (goodActor)", goodActorThrottleRetries, Averaged::False);
 
-		m.push_back(PerfMetric("Retries.too_old (badActor)", badActorTooOldRetries, false));
-		m.push_back(PerfMetric("Retries.too_old (goodActor)", goodActorTooOldRetries, false));
+		m.emplace_back("Retries.too_old (badActor)", badActorTooOldRetries, Averaged::False);
+		m.emplace_back("Retries.too_old (goodActor)", goodActorTooOldRetries, Averaged::False);
 
-		m.push_back(PerfMetric("Retries.commit_failed (badActor)", badActorCommitFailedRetries, false));
-		m.push_back(PerfMetric("Retries.commit_failed (goodActor)", goodActorCommitFailedRetries, false));
+		m.emplace_back("Retries.commit_failed (badActor)", badActorCommitFailedRetries, Averaged::False);
+		m.emplace_back("Retries.commit_failed (goodActor)", goodActorCommitFailedRetries, Averaged::False);
 
-		// Read Sampleing
-		m.push_back(PerfMetric("Avg Read Latency (ms, badActor)", 1000 * badActorReadLatency.mean(), true));
-		m.push_back(PerfMetric("Avg Read Latency (ms, goodActor)", 1000 * goodActorReadLatency.mean(), true));
-		m.push_back(PerfMetric("95% Read Latency (ms, badActor)", 1000 * badActorReadLatency.percentile(0.95), true));
-		m.push_back(PerfMetric("95% Read Latency (ms, goodActor)", 1000 * goodActorReadLatency.percentile(0.95), true));
-		m.push_back(PerfMetric("50% Read Latency (ms, badActor)", 1000 * badActorReadLatency.median(), true));
-		m.push_back(PerfMetric("50% Read Latency (ms, goodActor)", 1000 * goodActorReadLatency.median(), true));
+		// Read Sampling
+		m.emplace_back("Avg Read Latency (ms, badActor)", 1000 * badActorReadLatency.mean(), Averaged::True);
+		m.emplace_back("Avg Read Latency (ms, goodActor)", 1000 * goodActorReadLatency.mean(), Averaged::True);
+		m.emplace_back("95% Read Latency (ms, badActor)", 1000 * badActorReadLatency.percentile(0.95), Averaged::True);
+		m.emplace_back(
+		    "95% Read Latency (ms, goodActor)", 1000 * goodActorReadLatency.percentile(0.95), Averaged::True);
+		m.emplace_back("50% Read Latency (ms, badActor)", 1000 * badActorReadLatency.median(), Averaged::True);
+		m.emplace_back("50% Read Latency (ms, goodActor)", 1000 * goodActorReadLatency.median(), Averaged::True);
 
-		// Commit Sampleing
-		m.push_back(PerfMetric("Avg Commit Latency (ms, badActor)", 1000 * badActorCommitLatency.mean(), true));
-		m.push_back(PerfMetric("Avg Commit Latency (ms, goodActor)", 1000 * goodActorCommitLatency.mean(), true));
-		m.push_back(
-		    PerfMetric("95% Commit Latency (ms, badActor)", 1000 * badActorCommitLatency.percentile(0.95), true));
-		m.push_back(
-		    PerfMetric("95% Commit Latency (ms, goodActor)", 1000 * goodActorCommitLatency.percentile(0.95), true));
-		m.push_back(PerfMetric("50% Commit Latency (ms, badActor)", 1000 * badActorCommitLatency.median(), true));
-		m.push_back(PerfMetric("50% Commit Latency (ms, goodActor)", 1000 * goodActorCommitLatency.median(), true));
+		// Commit Sampling
+		m.emplace_back("Avg Commit Latency (ms, badActor)", 1000 * badActorCommitLatency.mean(), Averaged::True);
+		m.emplace_back("Avg Commit Latency (ms, goodActor)", 1000 * goodActorCommitLatency.mean(), Averaged::True);
+		m.emplace_back(
+		    "95% Commit Latency (ms, badActor)", 1000 * badActorCommitLatency.percentile(0.95), Averaged::True);
+		m.emplace_back(
+		    "95% Commit Latency (ms, goodActor)", 1000 * goodActorCommitLatency.percentile(0.95), Averaged::True);
+		m.emplace_back("50% Commit Latency (ms, badActor)", 1000 * badActorCommitLatency.median(), Averaged::True);
+		m.emplace_back("50% Commit Latency (ms, goodActor)", 1000 * goodActorCommitLatency.median(), Averaged::True);
 	}
 
 	Standalone<KeyValueRef> operator()(uint64_t n) { return KeyValueRef(keyForIndex(n), generateVal()); }
@@ -235,8 +233,8 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 				// give tag to client
 				if (self->writeThrottle) {
 					ASSERT(CLIENT_KNOBS->MAX_TAGS_PER_TRANSACTION >= MIN_TAGS_PER_TRANSACTION);
-					tr.options.tags.clear();
-					tr.options.readTags.clear();
+					tr.trState->options.tags.clear();
+					tr.trState->options.readTags.clear();
 					if (isBadActor) {
 						tr.setOption(FDBTransactionOptions::AUTO_THROTTLE_TAG, self->badTag);
 					} else if (deterministicRandom()->coinflip()) {
@@ -309,9 +307,9 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 		state Reference<DatabaseContext> db = cx.getReference();
 		loop {
 			wait(delay(1.0));
-			wait(store(tags, ThrottleApi::getThrottledTags(db, CLIENT_KNOBS->TOO_MANY, true)));
+			wait(store(tags, ThrottleApi::getThrottledTags(db, CLIENT_KNOBS->TOO_MANY, ContainsRecommended::True)));
 			self->recordThrottledTags(tags);
-		};
+		}
 	}
 
 	static std::string setToString(const std::set<std::string>& myset) {
@@ -323,4 +321,4 @@ struct WriteTagThrottlingWorkload : KVWorkload {
 	}
 };
 
-WorkloadFactory<WriteTagThrottlingWorkload> WriteTagThrottlingWorkloadFactory(WriteTagThrottlingWorkload::NAME);
+WorkloadFactory<WriteTagThrottlingWorkload> WriteTagThrottlingWorkloadFactory;

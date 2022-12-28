@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,7 +53,9 @@ ACTOR Future<Void> waitForContinuousFailure(IFailureMonitor* monitor,
 		choose {
 			when(wait(monitor->onStateEqual(endpoint, FailureStatus(false)))) {
 			} // SOMEDAY: Use onStateChanged() for efficiency
-			when(wait(delay(waitDelay))) { return Void(); }
+			when(wait(delay(waitDelay))) {
+				return Void();
+			}
 		}
 	}
 }
@@ -131,8 +133,17 @@ void SimpleFailureMonitor::endpointNotFound(Endpoint const& endpoint) {
 			TraceEvent(SevWarnAlways, "TooManyFailedEndpoints").suppressFor(1.0);
 			failedEndpoints.clear();
 		}
-		failedEndpoints.insert(endpoint);
+		failedEndpoints.emplace(endpoint, FailedReason::NOT_FOUND);
 	}
+	endpointKnownFailed.trigger(endpoint);
+}
+
+void SimpleFailureMonitor::unauthorizedEndpoint(Endpoint const& endpoint) {
+	TraceEvent(g_network->isSimulated() ? SevWarnAlways : SevError, "TriedAccessPrivateEndpoint")
+	    .suppressFor(1.0)
+	    .detail("Address", endpoint.getPrimaryAddress())
+	    .detail("Token", endpoint.token);
+	failedEndpoints.emplace(endpoint, FailedReason::UNAUTHORIZED);
 	endpointKnownFailed.trigger(endpoint);
 }
 
@@ -146,7 +157,15 @@ Future<Void> SimpleFailureMonitor::onDisconnectOrFailure(Endpoint const& endpoin
 	// If the endpoint or address is already failed, return right away
 	auto i = addressStatus.find(endpoint.getPrimaryAddress());
 	if (i == addressStatus.end() || i->second.isFailed() || failedEndpoints.count(endpoint)) {
-		TraceEvent("AlreadyDisconnected").detail("Addr", endpoint.getPrimaryAddress()).detail("Tok", endpoint.token);
+		TraceEvent event("AlreadyDisconnected");
+		if (endpoint.token.first() == 0xffffffffffffffff) {
+			// well known endpoint
+			event.suppressFor(5.0);
+		}
+		event.detail("Addr", endpoint.getPrimaryAddress())
+		    .detail("Reason", i == addressStatus.end() || i->second.isFailed() ? "Disconnected" : "EndpointFailed")
+		    .detail("Tok", endpoint.token)
+		    .log();
 		return Void();
 	}
 
@@ -208,8 +227,13 @@ bool SimpleFailureMonitor::permanentlyFailed(Endpoint const& endpoint) const {
 	return failedEndpoints.count(endpoint);
 }
 
+bool SimpleFailureMonitor::knownUnauthorized(Endpoint const& endpoint) const {
+	auto iter = failedEndpoints.find(endpoint);
+	return iter != failedEndpoints.end() && iter->second == FailedReason::UNAUTHORIZED;
+}
+
 void SimpleFailureMonitor::reset() {
 	addressStatus = std::unordered_map<NetworkAddress, FailureStatus>();
-	failedEndpoints = std::unordered_set<Endpoint>();
+	failedEndpoints = std::unordered_map<Endpoint, FailedReason>();
 	endpointKnownFailed.resetNoWaiting();
 }

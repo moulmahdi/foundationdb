@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,29 +20,29 @@
 
 #include "fdbrpc/simulator.h"
 #include "fdbclient/BackupAgent.actor.h"
+#include "fdbclient/ClusterConnectionMemoryRecord.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 // A workload which test the correctness of backup and restore process
 struct AtomicSwitchoverWorkload : TestWorkload {
+	static constexpr auto NAME = "AtomicSwitchover";
 	double switch1delay, switch2delay, stopDelay;
 	Standalone<VectorRef<KeyRangeRef>> backupRanges;
 	Database extraDB;
 
 	AtomicSwitchoverWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 
-		switch1delay = getOption(options, LiteralStringRef("switch1delay"), 50.0);
-		switch2delay = getOption(options, LiteralStringRef("switch2delay"), 50.0);
-		stopDelay = getOption(options, LiteralStringRef("stopDelay"), 50.0);
+		switch1delay = getOption(options, "switch1delay"_sr, 50.0);
+		switch2delay = getOption(options, "switch2delay"_sr, 50.0);
+		stopDelay = getOption(options, "stopDelay"_sr, 50.0);
 
-		backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
+		addDefaultBackupRanges(backupRanges);
 
-		auto extraFile = makeReference<ClusterConnectionFile>(*g_simulator.extraDB);
-		extraDB = Database::createDatabase(extraFile, -1);
+		ASSERT(g_simulator->extraDatabases.size() == 1);
+		extraDB = Database::createSimulatedExtraDatabase(g_simulator->extraDatabases[0], wcx.defaultTenant);
 	}
-
-	std::string description() const override { return "AtomicSwitchover"; }
 
 	Future<Void> setup(Database const& cx) override {
 		if (clientId != 0)
@@ -77,7 +77,7 @@ struct AtomicSwitchoverWorkload : TestWorkload {
 
 	Future<bool> check(Database const& cx) override { return true; }
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR static Future<Void> diffRanges(Standalone<VectorRef<KeyRangeRef>> ranges,
 	                                     StringRef backupPrefix,
@@ -190,12 +190,12 @@ struct AtomicSwitchoverWorkload : TestWorkload {
 		TraceEvent("AS_Done").log();
 
 		// SOMEDAY: Remove after backup agents can exist quiescently
-		if (g_simulator.drAgents == ISimulator::BackupAgentType::BackupToDB) {
-			g_simulator.drAgents = ISimulator::BackupAgentType::NoBackupAgents;
+		if (g_simulator->drAgents == ISimulator::BackupAgentType::BackupToDB) {
+			g_simulator->drAgents = ISimulator::BackupAgentType::NoBackupAgents;
 		}
 
 		return Void();
 	}
 };
 
-WorkloadFactory<AtomicSwitchoverWorkload> AtomicSwitchoverWorkloadFactory("AtomicSwitchover");
+WorkloadFactory<AtomicSwitchoverWorkload> AtomicSwitchoverWorkloadFactory;

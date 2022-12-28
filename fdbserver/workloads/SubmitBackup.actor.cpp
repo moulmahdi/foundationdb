@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +19,17 @@
  */
 
 #include "fdbclient/FDBTypes.h"
+#include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/ReadYourWrites.h"
 #include "fdbrpc/simulator.h"
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/BackupContainer.h"
+#include "fdbserver/Knobs.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
-struct SubmitBackupWorkload final : TestWorkload {
+struct SubmitBackupWorkload : TestWorkload {
+	static constexpr auto NAME = "SubmitBackup";
 
 	FileBackupAgent backupAgent;
 
@@ -39,28 +42,30 @@ struct SubmitBackupWorkload final : TestWorkload {
 	IncrementalBackupOnly incremental{ false };
 
 	SubmitBackupWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		backupDir = getOption(options, LiteralStringRef("backupDir"), LiteralStringRef("file://simfdb/backups/"));
-		tag = getOption(options, LiteralStringRef("tag"), LiteralStringRef("default"));
-		delayFor = getOption(options, LiteralStringRef("delayFor"), 10.0);
-		initSnapshotInterval = getOption(options, LiteralStringRef("initSnapshotInterval"), 0);
-		snapshotInterval = getOption(options, LiteralStringRef("snapshotInterval"), 1e8);
-		stopWhenDone.set(getOption(options, LiteralStringRef("stopWhenDone"), true));
-		incremental.set(getOption(options, LiteralStringRef("incremental"), false));
+		backupDir = getOption(options, "backupDir"_sr, "file://simfdb/backups/"_sr);
+		tag = getOption(options, "tag"_sr, "default"_sr);
+		delayFor = getOption(options, "delayFor"_sr, 10.0);
+		initSnapshotInterval = getOption(options, "initSnapshotInterval"_sr, 0);
+		snapshotInterval = getOption(options, "snapshotInterval"_sr, 1e8);
+		stopWhenDone.set(getOption(options, "stopWhenDone"_sr, true));
+		incremental.set(getOption(options, "incremental"_sr, false));
 	}
-
-	static constexpr const char* DESCRIPTION = "SubmitBackup";
 
 	ACTOR static Future<Void> _start(SubmitBackupWorkload* self, Database cx) {
 		wait(delay(self->delayFor));
-		Standalone<VectorRef<KeyRangeRef>> backupRanges;
-		backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
+		state Standalone<VectorRef<KeyRangeRef>> backupRanges;
+		addDefaultBackupRanges(backupRanges);
+		state DatabaseConfiguration configuration = wait(getDatabaseConfiguration(cx));
 		try {
 			wait(self->backupAgent.submitBackup(cx,
 			                                    self->backupDir,
+			                                    {},
 			                                    self->initSnapshotInterval,
 			                                    self->snapshotInterval,
 			                                    self->tag.toString(),
 			                                    backupRanges,
+			                                    SERVER_KNOBS->ENABLE_ENCRYPTION &&
+			                                        configuration.tenantMode != TenantMode::OPTIONAL_TENANT,
 			                                    self->stopWhenDone,
 			                                    UsePartitionedLog::False,
 			                                    self->incremental));
@@ -73,11 +78,10 @@ struct SubmitBackupWorkload final : TestWorkload {
 		return Void();
 	}
 
-	std::string description() const override { return DESCRIPTION; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override { return clientId ? Void() : _start(this, cx); }
 	Future<bool> check(Database const& cx) override { return true; }
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<SubmitBackupWorkload> SubmitBackupWorkloadFactory(SubmitBackupWorkload::DESCRIPTION);
+WorkloadFactory<SubmitBackupWorkload> SubmitBackupWorkloadFactory;

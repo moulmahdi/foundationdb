@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,15 +28,16 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct WorkerErrorsWorkload : TestWorkload {
+	static constexpr auto NAME = "WorkerErrors";
+
 	WorkerErrorsWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {}
 
-	std::string description() const override { return "WorkerErrorsWorkload"; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override { return _start(cx, this); }
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 
 	ACTOR Future<std::vector<TraceEventFields>> latestEventOnWorkers(std::vector<WorkerDetails> workers) {
-		state vector<Future<TraceEventFields>> eventTraces;
+		state std::vector<Future<TraceEventFields>> eventTraces;
 		eventTraces.reserve(workers.size());
 		for (int c = 0; c < workers.size(); c++) {
 			eventTraces.push_back(workers[c].interf.eventLogRequest.getReply(EventLogRequest()));
@@ -44,7 +45,7 @@ struct WorkerErrorsWorkload : TestWorkload {
 
 		wait(timeoutError(waitForAll(eventTraces), 2.0));
 
-		vector<TraceEventFields> results;
+		std::vector<TraceEventFields> results;
 		results.reserve(eventTraces.size());
 		for (int i = 0; i < eventTraces.size(); i++) {
 			results.push_back(eventTraces[i].get());
@@ -54,7 +55,7 @@ struct WorkerErrorsWorkload : TestWorkload {
 	}
 
 	ACTOR Future<Void> _start(Database cx, WorkerErrorsWorkload* self) {
-		state vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
+		state std::vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
 		std::vector<TraceEventFields> errors = wait(self->latestEventOnWorkers(workers));
 		for (auto e : errors) {
 			printf("%s\n", e.toString().c_str());
@@ -65,4 +66,4 @@ struct WorkerErrorsWorkload : TestWorkload {
 	Future<bool> check(Database const& cx) override { return true; }
 };
 
-WorkloadFactory<WorkerErrorsWorkload> WorkerErrorsWorkloadFactory("WorkerErrors");
+WorkloadFactory<WorkerErrorsWorkload> WorkerErrorsWorkloadFactory;

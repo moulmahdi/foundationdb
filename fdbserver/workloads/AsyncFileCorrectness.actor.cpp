@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include <cinttypes>
 
+#include "fmt/format.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/ActorCollection.h"
 #include "flow/IRandom.h"
@@ -43,6 +44,7 @@ struct OperationInfo {
 };
 
 struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
+	static constexpr auto NAME = "AsyncFileCorrectness";
 	// Maximum number of bytes operated on by a file operation
 	int maxOperationSize;
 
@@ -50,18 +52,18 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 	int numSimultaneousOperations;
 
 	// The futures for asynchronous IO operations
-	vector<Future<OperationInfo>> operations;
+	std::vector<Future<OperationInfo>> operations;
 
 	// Our in memory representation of what the file should be
 	Reference<AsyncFileBuffer> memoryFile;
 
 	// A vector holding a lock for each byte in the file. 0xFFFFFFFF means that the byte is being written, any other
 	// number means that it is being read that many times
-	vector<uint32_t> fileLock;
+	std::vector<uint32_t> fileLock;
 
 	// A mask designating whether each byte in the file has been explicitly written (bytes which weren't explicitly
 	// written have no guarantees about content)
-	vector<unsigned char> fileValidityMask;
+	std::vector<unsigned char> fileValidityMask;
 
 	// Whether or not the correctness test succeeds
 	bool success;
@@ -74,26 +76,25 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 
 	AsyncFileCorrectnessWorkload(WorkloadContext const& wcx)
 	  : AsyncFileWorkload(wcx), memoryFile(nullptr), success(true), numOperations("Num Operations") {
-		maxOperationSize = getOption(options, LiteralStringRef("maxOperationSize"), 4096);
-		numSimultaneousOperations = getOption(options, LiteralStringRef("numSimultaneousOperations"), 10);
-		targetFileSize = getOption(options, LiteralStringRef("targetFileSize"), (uint64_t)163840);
+		maxOperationSize = getOption(options, "maxOperationSize"_sr, 4096);
+		numSimultaneousOperations = getOption(options, "numSimultaneousOperations"_sr, 10);
+		targetFileSize = getOption(options, "targetFileSize"_sr, (uint64_t)163840);
 
 		if (unbufferedIO)
 			maxOperationSize = std::max(_PAGE_SIZE, maxOperationSize);
 
 		if (maxOperationSize * numSimultaneousOperations > targetFileSize * 0.25) {
 			targetFileSize *= (int)ceil((maxOperationSize * numSimultaneousOperations * 4.0) / targetFileSize);
-			printf("Target file size is insufficient to support %d simultaneous operations of size %d; changing to "
-			       "%" PRId64 "\n",
-			       numSimultaneousOperations,
-			       maxOperationSize,
-			       targetFileSize);
+			fmt::print(
+			    "Target file size is insufficient to support {0} simultaneous operations of size {1}; changing to "
+			    "{2}\n",
+			    numSimultaneousOperations,
+			    maxOperationSize,
+			    targetFileSize);
 		}
 	}
 
 	~AsyncFileCorrectnessWorkload() override {}
-
-	std::string description() const override { return "AsyncFileCorrectness"; }
 
 	Future<Void> setup(Database const& cx) override {
 		if (enabled)
@@ -159,7 +160,7 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 	}
 
 	ACTOR Future<Void> runCorrectnessTest(AsyncFileCorrectnessWorkload* self) {
-		state vector<OperationInfo> postponedOperations;
+		state std::vector<OperationInfo> postponedOperations;
 		state int validOperations = 0;
 
 		loop {
@@ -264,7 +265,7 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 
 			// Cumulative density function for the different operations
 			int cdfArray[] = { 0, 1000, 2000, 2100, 2101, 2102 };
-			vector<int> cdf = vector<int>(cdfArray, cdfArray + 6);
+			std::vector<int> cdf = std::vector<int>(cdfArray, cdfArray + 6);
 
 			// Choose a random operation type (READ, WRITE, SYNC, REOPEN, TRUNCATE).
 			int random = deterministicRandom()->randomInt(0, cdf.back());
@@ -375,7 +376,7 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 			}
 		} else if (info.operation == WRITE) {
 			info.data = self->allocateBuffer(info.length);
-			generateRandomData(reinterpret_cast<uint8_t*>(info.data->buffer), info.length);
+			deterministicRandom()->randomBytes(reinterpret_cast<uint8_t*>(info.data->buffer), info.length);
 			memcpy(&self->memoryFile->buffer[info.offset], info.data->buffer, info.length);
 			memset(&self->fileValidityMask[info.offset], 0xFF, info.length);
 
@@ -396,12 +397,12 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 			int64_t fileSize = wait(self->fileHandle->file->size());
 			int64_t fileSizeChange = fileSize - self->fileSize;
 			if (fileSizeChange >= _PAGE_SIZE) {
-				printf("Reopened file increased in size by %" PRId64 " bytes (at most %d allowed)\n",
-				       fileSizeChange,
-				       _PAGE_SIZE - 1);
+				fmt::print("Reopened file increased in size by {0} bytes (at most {1} allowed)\n",
+				           fileSizeChange,
+				           _PAGE_SIZE - 1);
 				self->success = false;
 			} else if (fileSizeChange < 0) {
-				printf("Reopened file decreased in size by %" PRId64 " bytes\n", -fileSizeChange);
+				fmt::print("Reopened file decreased in size by {} bytes\n", -fileSizeChange);
 				self->success = false;
 			}
 
@@ -426,12 +427,12 @@ struct AsyncFileCorrectnessWorkload : public AsyncFileWorkload {
 
 	Future<bool> check(Database const& cx) override { return success; }
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (enabled) {
-			m.push_back(PerfMetric("Number of Operations Performed", numOperations.getValue(), false));
-			m.push_back(PerfMetric("Average CPU Utilization (Percentage)", averageCpuUtilization * 100, false));
+			m.emplace_back("Number of Operations Performed", numOperations.getValue(), Averaged::False);
+			m.emplace_back("Average CPU Utilization (Percentage)", averageCpuUtilization * 100, Averaged::False);
 		}
 	}
 };
 
-WorkloadFactory<AsyncFileCorrectnessWorkload> AsyncFileCorrectnessWorkloadFactory("AsyncFileCorrectness");
+WorkloadFactory<AsyncFileCorrectnessWorkload> AsyncFileCorrectnessWorkloadFactory;

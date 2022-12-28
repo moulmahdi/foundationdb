@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2020 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -71,7 +71,7 @@ struct Factory<RefType::FlowReferenceThreadSafe> {
 
 template <RefType refType>
 static void bench_ref_create_and_destroy(benchmark::State& state) {
-	while (state.KeepRunning()) {
+	for (auto _ : state) {
 		auto ptr = Factory<refType>::create();
 		benchmark::DoNotOptimize(ptr);
 		Factory<refType>::cleanup(ptr);
@@ -82,7 +82,7 @@ static void bench_ref_create_and_destroy(benchmark::State& state) {
 template <RefType refType>
 static void bench_ref_copy(benchmark::State& state) {
 	auto ptr = Factory<refType>::create();
-	while (state.KeepRunning()) {
+	for (auto _ : state) {
 		auto ptr2 = ptr;
 		benchmark::DoNotOptimize(ptr2);
 	}

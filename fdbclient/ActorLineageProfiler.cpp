@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2021 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 
 #include "flow/flow.h"
 #include "flow/singleton.h"
-#include "fdbrpc/IAsyncFile.h"
+#include "flow/IAsyncFile.h"
 #include "fdbclient/ActorLineageProfiler.h"
 #include "fdbclient/NameLineage.h"
 #include <msgpack.hpp>
@@ -239,11 +239,17 @@ std::vector<std::shared_ptr<Sample>> SampleCollection_t::get(double from /*= 0.0
 }
 
 void sample(LineageReference* lineagePtr) {
-	if (!lineagePtr->isValid()) { return; }
+	if (!lineagePtr->isValid()) {
+		return;
+	}
+	if (!lineagePtr->isAllocated()) {
+		lineagePtr->allocate();
+	}
 	(*lineagePtr)->modify(&NameLineage::actorName) = lineagePtr->actorName();
-	boost::asio::post(ActorLineageProfiler::instance().context(), [lineage = LineageReference::addRef(lineagePtr->getPtr())]() {
-		SampleCollection::instance().collect(lineage);
-	});
+	boost::asio::post(ActorLineageProfiler::instance().context(),
+	                  [lineage = LineageReference::addRef(lineagePtr->getPtr())]() {
+		                  SampleCollection::instance().collect(lineage);
+	                  });
 }
 
 struct ProfilerImpl {

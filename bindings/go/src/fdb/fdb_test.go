@@ -24,15 +24,18 @@ package fdb_test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 )
 
+const API_VERSION int = 720
+
 func ExampleOpenDefault() {
 	var e error
 
-	e = fdb.APIVersion(710)
+	e = fdb.APIVersion(API_VERSION)
 	if e != nil {
 		fmt.Printf("Unable to set API version: %v\n", e)
 		return
@@ -46,13 +49,16 @@ func ExampleOpenDefault() {
 		return
 	}
 
-	_ = db
+	// Close the database after usage
+	defer db.Close()
+
+	// Do work here
 
 	// Output:
 }
 
 func TestVersionstamp(t *testing.T) {
-	fdb.MustAPIVersion(710)
+	fdb.MustAPIVersion(API_VERSION)
 	db := fdb.MustOpenDefault()
 
 	setVs := func(t fdb.Transactor, key fdb.Key) (fdb.FutureKey, error) {
@@ -97,8 +103,20 @@ func TestVersionstamp(t *testing.T) {
 	t.Logf("setOne returned %s", k)
 }
 
+func TestReadTransactionOptions(t *testing.T) {
+	fdb.MustAPIVersion(API_VERSION)
+	db := fdb.MustOpenDefault()
+	_, e := db.ReadTransact(func(rtr fdb.ReadTransaction) (interface{}, error) {
+		rtr.Options().SetAccessSystemKeys()
+		return rtr.Get(fdb.Key("\xff/")).MustGet(), nil
+	})
+	if e != nil {
+		t.Errorf("Failed to read system key: %s", e)
+	}
+}
+
 func ExampleTransactor() {
-	fdb.MustAPIVersion(710)
+	fdb.MustAPIVersion(API_VERSION)
 	db := fdb.MustOpenDefault()
 
 	setOne := func(t fdb.Transactor, key fdb.Key, value []byte) error {
@@ -149,7 +167,7 @@ func ExampleTransactor() {
 }
 
 func ExampleReadTransactor() {
-	fdb.MustAPIVersion(710)
+	fdb.MustAPIVersion(API_VERSION)
 	db := fdb.MustOpenDefault()
 
 	getOne := func(rt fdb.ReadTransactor, key fdb.Key) ([]byte, error) {
@@ -202,7 +220,7 @@ func ExampleReadTransactor() {
 }
 
 func ExamplePrefixRange() {
-	fdb.MustAPIVersion(710)
+	fdb.MustAPIVersion(API_VERSION)
 	db := fdb.MustOpenDefault()
 
 	tr, e := db.CreateTransaction()
@@ -241,7 +259,7 @@ func ExamplePrefixRange() {
 }
 
 func ExampleRangeIterator() {
-	fdb.MustAPIVersion(710)
+	fdb.MustAPIVersion(API_VERSION)
 	db := fdb.MustOpenDefault()
 
 	tr, e := db.CreateTransaction()
@@ -298,4 +316,55 @@ func TestKeyToString(t *testing.T) {
 func ExamplePrintable() {
 	fmt.Println(fdb.Printable([]byte{0, 1, 2, 'a', 'b', 'c', '1', '2', '3', '!', '?', 255}))
 	// Output: \x00\x01\x02abc123!?\xff
+}
+
+func TestDatabaseCloseRemovesResources(t *testing.T) {
+	err := fdb.APIVersion(API_VERSION)
+	if err != nil {
+		t.Fatalf("Unable to set API version: %v\n", err)
+	}
+
+	// OpenDefault opens the database described by the platform-specific default
+	// cluster file
+	db, err := fdb.OpenDefault()
+	if err != nil {
+		t.Fatalf("Unable to set API version: %v\n", err)
+	}
+
+	// Close the database after usage
+	db.Close()
+
+	// Open the same database again, if the database is still in the cache we would return the same object, if not we create a new object with a new pointer
+	newDB, err := fdb.OpenDefault()
+	if err != nil {
+		t.Fatalf("Unable to set API version: %v\n", err)
+	}
+
+	if db == newDB {
+		t.Fatalf("Expected a different database object, got: %v and %v\n", db, newDB)
+	}
+}
+
+func ExampleOpenWithConnectionString() {
+	fdb.MustAPIVersion(API_VERSION)
+
+	clusterFileContent, err := os.ReadFile(os.Getenv("FDB_CLUSTER_FILE"))
+	if err != nil {
+		fmt.Errorf("Unable to read cluster file: %v\n", err)
+		return
+	}
+
+	// OpenWithConnectionString opens the database described by the connection string
+	db, err := fdb.OpenWithConnectionString(string(clusterFileContent))
+	if err != nil {
+		fmt.Errorf("Unable to open database: %v\n", err)
+		return
+	}
+
+	// Close the database after usage
+	defer db.Close()
+
+	// Do work here
+
+	// Output:
 }

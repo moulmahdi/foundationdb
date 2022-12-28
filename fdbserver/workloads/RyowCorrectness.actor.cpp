@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 #define TRACE_TRANSACTION 0
 
 #if TRACE_TRANSACTION
-StringRef debugKey = LiteralStringRef("0000000000uldlamzpspf");
+StringRef debugKey = "0000000000uldlamzpspf"_sr;
 #endif
 
 // A struct representing an operation to be performed on a transaction
@@ -54,6 +54,7 @@ struct Operation {
 
 // A workload which executes random sequences of operations on RYOW transactions and confirms the results
 struct RyowCorrectnessWorkload : ApiWorkload {
+	static constexpr auto NAME = "RyowCorrectness";
 
 	// How long the test should run
 	int duration;
@@ -62,11 +63,9 @@ struct RyowCorrectnessWorkload : ApiWorkload {
 	int opsPerTransaction;
 
 	RyowCorrectnessWorkload(WorkloadContext const& wcx) : ApiWorkload(wcx, 1) {
-		duration = getOption(options, LiteralStringRef("duration"), 60);
-		opsPerTransaction = getOption(options, LiteralStringRef("opsPerTransaction"), 50);
+		duration = getOption(options, "duration"_sr, 60);
+		opsPerTransaction = getOption(options, "opsPerTransaction"_sr, 50);
 	}
-
-	std::string description() const override { return "RyowCorrectness"; }
 
 	ACTOR Future<Void> performSetup(Database cx, RyowCorrectnessWorkload* self) {
 		std::vector<TransactionType> types;
@@ -83,7 +82,7 @@ struct RyowCorrectnessWorkload : ApiWorkload {
 		std::vector<Operation> sequence;
 
 		int pdfArray[] = { 0, 100, 100, 50, 50, 20, 100, 5 };
-		vector<int> pdf = vector<int>(pdfArray, pdfArray + 8);
+		std::vector<int> pdf = std::vector<int>(pdfArray, pdfArray + 8);
 
 		// Choose a random operation type (SET, GET, GET_RANGE, GET_RANGE_SELECTOR, GET_KEY, CLEAR, CLEAR_RANGE).
 		int totalDensity = 0;
@@ -142,7 +141,7 @@ struct RyowCorrectnessWorkload : ApiWorkload {
 	void pushKVPair(std::vector<RangeResult>& results, Key const& key, Optional<Value> const& value) {
 		RangeResult result;
 		if (!value.present())
-			result.push_back_deep(result.arena(), KeyValueRef(key, LiteralStringRef("VALUE_NOT_PRESENT")));
+			result.push_back_deep(result.arena(), KeyValueRef(key, "VALUE_NOT_PRESENT"_sr));
 		else
 			result.push_back_deep(result.arena(), KeyValueRef(key, value.get()));
 
@@ -299,14 +298,14 @@ struct RyowCorrectnessWorkload : ApiWorkload {
 					       printable(op.beginKey).c_str(),
 					       printable(op.endKey).c_str(),
 					       op.limit,
-					       op.reverse);
+					       static_cast<bool>(op.reverse));
 					break;
 				case Operation::GET_RANGE_SELECTOR:
 					printf("Operation GET_RANGE_SELECTOR failed: begin = %s, end = %s, limit = %d, reverse = %d\n",
 					       op.beginSelector.toString().c_str(),
 					       op.endSelector.toString().c_str(),
 					       op.limit,
-					       op.reverse);
+					       static_cast<bool>(op.reverse));
 					break;
 				case Operation::GET_KEY:
 					printf("Operation GET_KEY failed: selector = %s\n", op.beginSelector.toString().c_str());
@@ -355,7 +354,7 @@ struct RyowCorrectnessWorkload : ApiWorkload {
 		return ::success(timeout(performTest(cx, data, this), duration));
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<RyowCorrectnessWorkload> RyowCorrectnessWorkloadFactory("RyowCorrectness");
+WorkloadFactory<RyowCorrectnessWorkload> RyowCorrectnessWorkloadFactory;

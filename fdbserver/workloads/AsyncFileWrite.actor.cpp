@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,16 +21,17 @@
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/ActorCollection.h"
 #include "flow/SystemMonitor.h"
-#include "fdbrpc/IAsyncFile.h"
+#include "flow/IAsyncFile.h"
 #include "fdbserver/workloads/AsyncFile.actor.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct AsyncFileWriteWorkload : public AsyncFileWorkload {
+	static constexpr auto NAME = "AsyncFileWrite";
 	// Buffer used to store what is being written
 	Reference<AsyncFileBuffer> writeBuffer;
 
 	// The futures for the asynchronous write futures
-	vector<Future<Void>> writeFutures;
+	std::vector<Future<Void>> writeFutures;
 
 	// Number of writes to perform in parallel.  Write tests are performed only if this is greater than zero and
 	// numParallelReads is zero
@@ -47,13 +48,11 @@ struct AsyncFileWriteWorkload : public AsyncFileWorkload {
 
 	AsyncFileWriteWorkload(WorkloadContext const& wcx)
 	  : AsyncFileWorkload(wcx), writeBuffer(nullptr), bytesWritten("Bytes Written") {
-		numParallelWrites = getOption(options, LiteralStringRef("numParallelWrites"), 0);
-		writeSize = getOption(options, LiteralStringRef("writeSize"), _PAGE_SIZE);
-		fileSize = getOption(options, LiteralStringRef("fileSize"), 10002432);
-		sequential = getOption(options, LiteralStringRef("sequential"), true);
+		numParallelWrites = getOption(options, "numParallelWrites"_sr, 0);
+		writeSize = getOption(options, "writeSize"_sr, _PAGE_SIZE);
+		fileSize = getOption(options, "fileSize"_sr, 10002432);
+		sequential = getOption(options, "sequential"_sr, true);
 	}
-
-	std::string description() const override { return "AsyncFileWrite"; }
 
 	Future<Void> setup(Database const& cx) override {
 		if (enabled)
@@ -145,12 +144,12 @@ struct AsyncFileWriteWorkload : public AsyncFileWorkload {
 		}
 	}
 
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (enabled) {
-			m.push_back(PerfMetric("Bytes written/sec", bytesWritten.getValue() / testDuration, false));
-			m.push_back(PerfMetric("Average CPU Utilization (Percentage)", averageCpuUtilization * 100, false));
+			m.emplace_back("Bytes written/sec", bytesWritten.getValue() / testDuration, Averaged::False);
+			m.emplace_back("Average CPU Utilization (Percentage)", averageCpuUtilization * 100, Averaged::False);
 		}
 	}
 };
 
-WorkloadFactory<AsyncFileWriteWorkload> AsyncFileWriteWorkloadFactory("AsyncFileWrite");
+WorkloadFactory<AsyncFileWriteWorkload> AsyncFileWriteWorkloadFactory;

@@ -1,0 +1,16 @@
+[configuration]
+encryptModes = ['domain_aware', 'cluster_aware']
+
+[[knobs]]
+enable_encryption = true
+enable_blob_file_encryption = true
+enable_blob_file_compression = true
+
+[[test]]
+testTitle = 'BlobGranuleFileUnit'
+useDB = false
+startDelay = 0
+
+    [[test.workload]]
+    testName = 'UnitTests'
+    testsMatching = '/blobgranule/files/'

@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,9 @@
 #include "fdbclient/json_spirit/json_spirit_writer_template.h"
 #include "fdbclient/json_spirit/json_spirit_reader_template.h"
 #include "fdbrpc/genericactors.actor.h"
-#include "flow/actorcompiler.h" // has to be last include
 #include <cstdint>
+
+#include "flow/actorcompiler.h" // has to be last include
 
 json_spirit::mValue readJSONStrictly(const std::string& s) {
 	json_spirit::mValue val;
@@ -302,26 +303,39 @@ void JSONDoc::mergeValueInto(json_spirit::mValue& dst, const json_spirit::mValue
 
 // Check if a quorum of coordination servers is reachable
 // Will not throw, will just return non-present Optional if error
-ACTOR Future<Optional<StatusObject>> clientCoordinatorsStatusFetcher(Reference<ClusterConnectionFile> f,
+ACTOR Future<Optional<StatusObject>> clientCoordinatorsStatusFetcher(Reference<IClusterConnectionRecord> connRecord,
                                                                      bool* quorum_reachable,
                                                                      int* coordinatorsFaultTolerance) {
 	try {
-		state ClientCoordinators coord(f);
+		state ClientCoordinators coord(connRecord);
 		state StatusObject statusObj;
 
-		state vector<Future<Optional<LeaderInfo>>> leaderServers;
+		state std::vector<Future<Optional<LeaderInfo>>> leaderServers;
 		leaderServers.reserve(coord.clientLeaderServers.size());
-		for (int i = 0; i < coord.clientLeaderServers.size(); i++)
-			leaderServers.push_back(retryBrokenPromise(coord.clientLeaderServers[i].getLeader,
-			                                           GetLeaderRequest(coord.clusterKey, UID()),
-			                                           TaskPriority::CoordinationReply));
+		for (int i = 0; i < coord.clientLeaderServers.size(); i++) {
+			if (coord.clientLeaderServers[i].hostname.present()) {
+				leaderServers.push_back(retryGetReplyFromHostname(GetLeaderRequest(coord.clusterKey, UID()),
+				                                                  coord.clientLeaderServers[i].hostname.get(),
+				                                                  WLTOKEN_CLIENTLEADERREG_GETLEADER,
+				                                                  TaskPriority::CoordinationReply));
+			} else {
+				leaderServers.push_back(retryBrokenPromise(coord.clientLeaderServers[i].getLeader,
+				                                           GetLeaderRequest(coord.clusterKey, UID()),
+				                                           TaskPriority::CoordinationReply));
+			}
+		}
 
-		state vector<Future<ProtocolInfoReply>> coordProtocols;
+		state std::vector<Future<ProtocolInfoReply>> coordProtocols;
 		coordProtocols.reserve(coord.clientLeaderServers.size());
 		for (int i = 0; i < coord.clientLeaderServers.size(); i++) {
-			RequestStream<ProtocolInfoRequest> requestStream{ Endpoint{
-				{ coord.clientLeaderServers[i].getLeader.getEndpoint().addresses }, WLTOKEN_PROTOCOL_INFO } };
-			coordProtocols.push_back(retryBrokenPromise(requestStream, ProtocolInfoRequest{}));
+			if (coord.clientLeaderServers[i].hostname.present()) {
+				coordProtocols.push_back(retryGetReplyFromHostname(
+				    ProtocolInfoRequest{}, coord.clientLeaderServers[i].hostname.get(), WLTOKEN_PROTOCOL_INFO));
+			} else {
+				RequestStream<ProtocolInfoRequest> requestStream{ Endpoint::wellKnown(
+					{ coord.clientLeaderServers[i].getLeader.getEndpoint().addresses }, WLTOKEN_PROTOCOL_INFO) };
+				coordProtocols.push_back(retryBrokenPromise(requestStream, ProtocolInfoRequest{}));
+			}
 		}
 
 		wait(smartQuorum(leaderServers, leaderServers.size() / 2 + 1, 1.5) &&
@@ -335,9 +349,7 @@ ACTOR Future<Optional<StatusObject>> clientCoordinatorsStatusFetcher(Reference<C
 		int coordinatorsUnavailable = 0;
 		for (int i = 0; i < leaderServers.size(); i++) {
 			StatusObject coordStatus;
-			coordStatus["address"] =
-			    coord.clientLeaderServers[i].getLeader.getEndpoint().getPrimaryAddress().toString();
-
+			coordStatus["address"] = coord.clientLeaderServers[i].getAddressString();
 			if (leaderServers[i].isReady()) {
 				coordStatus["reachable"] = true;
 			} else {
@@ -365,14 +377,16 @@ ACTOR Future<Optional<StatusObject>> clientCoordinatorsStatusFetcher(Reference<C
 
 // Client section of the json output
 // Will NOT throw, errors will be put into messages array
-ACTOR Future<StatusObject> clientStatusFetcher(Reference<ClusterConnectionFile> f,
+ACTOR Future<StatusObject> clientStatusFetcher(Reference<IClusterConnectionRecord> connRecord,
                                                StatusArray* messages,
                                                bool* quorum_reachable,
                                                int* coordinatorsFaultTolerance) {
 	state StatusObject statusObj;
 
-	Optional<StatusObject> coordsStatusObj =
-	    wait(clientCoordinatorsStatusFetcher(f, quorum_reachable, coordinatorsFaultTolerance));
+	state Optional<StatusObject> coordsStatusObj =
+	    wait(clientCoordinatorsStatusFetcher(connRecord, quorum_reachable, coordinatorsFaultTolerance));
+	state bool contentsUpToDate = wait(connRecord->upToDate());
+
 	if (coordsStatusObj.present()) {
 		statusObj["coordinators"] = coordsStatusObj.get();
 		if (!*quorum_reachable)
@@ -381,17 +395,17 @@ ACTOR Future<StatusObject> clientStatusFetcher(Reference<ClusterConnectionFile> 
 		messages->push_back(makeMessage("status_incomplete_coordinators", "Could not fetch coordinator info."));
 
 	StatusObject statusObjClusterFile;
-	statusObjClusterFile["path"] = f->getFilename();
-	bool contentsUpToDate = f->fileContentsUpToDate();
+	statusObjClusterFile["path"] = connRecord->getLocation();
 	statusObjClusterFile["up_to_date"] = contentsUpToDate;
 	statusObj["cluster_file"] = statusObjClusterFile;
 
 	if (!contentsUpToDate) {
+		ClusterConnectionString storedConnectionString = wait(connRecord->getStoredConnectionString());
 		std::string description = "Cluster file contents do not match current cluster connection string.";
 		description += "\nThe file contains the connection string: ";
-		description += ClusterConnectionFile(f->getFilename()).getConnectionString().toString().c_str();
+		description += storedConnectionString.toString().c_str();
 		description += "\nThe current connection string is: ";
-		description += f->getConnectionString().toString().c_str();
+		description += connRecord->getConnectionString().toString().c_str();
 		description += "\nVerify the cluster file and its parent directory are writable and that the cluster file has "
 		               "not been overwritten externally. To change coordinators without manual intervention, the "
 		               "cluster file and its containing folder must be writable by all servers and clients. If a "
@@ -491,7 +505,7 @@ StatusObject getClientDatabaseStatus(StatusObjectReader client, StatusObjectRead
 	return databaseStatus;
 }
 
-ACTOR Future<StatusObject> statusFetcherImpl(Reference<ClusterConnectionFile> f,
+ACTOR Future<StatusObject> statusFetcherImpl(Reference<IClusterConnectionRecord> connRecord,
                                              Reference<AsyncVar<Optional<ClusterInterface>>> clusterInterface) {
 	if (!g_network)
 		throw network_not_setup();
@@ -508,7 +522,7 @@ ACTOR Future<StatusObject> statusFetcherImpl(Reference<ClusterConnectionFile> f,
 		state int64_t clientTime = g_network->timer();
 
 		StatusObject _statusObjClient =
-		    wait(clientStatusFetcher(f, &clientMessages, &quorum_reachable, &coordinatorsFaultTolerance));
+		    wait(clientStatusFetcher(connRecord, &clientMessages, &quorum_reachable, &coordinatorsFaultTolerance));
 		statusObjClient = _statusObjClient;
 
 		if (clientTime != -1)
@@ -598,7 +612,7 @@ ACTOR Future<StatusObject> statusFetcherImpl(Reference<ClusterConnectionFile> f,
 }
 
 ACTOR Future<Void> timeoutMonitorLeader(Database db) {
-	state Future<Void> leadMon = monitorLeader<ClusterInterface>(db->getConnectionFile(), db->statusClusterInterface);
+	state Future<Void> leadMon = monitorLeader<ClusterInterface>(db->getConnectionRecord(), db->statusClusterInterface);
 	loop {
 		wait(delay(CLIENT_KNOBS->STATUS_IDLE_TIMEOUT + 0.00001 + db->lastStatusFetch - now()));
 		if (now() - db->lastStatusFetch > CLIENT_KNOBS->STATUS_IDLE_TIMEOUT) {
@@ -615,5 +629,5 @@ Future<StatusObject> StatusClient::statusFetcher(Database db) {
 		db->statusLeaderMon = timeoutMonitorLeader(db);
 	}
 
-	return statusFetcherImpl(db->getConnectionFile(), db->statusClusterInterface);
+	return statusFetcherImpl(db->getConnectionRecord(), db->statusClusterInterface);
 }

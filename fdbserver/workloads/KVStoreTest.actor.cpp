@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include <ctime>
 #include <cinttypes>
+#include "fmt/format.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/IKeyValueStore.h"
 #include "flow/ActorCollection.h"
@@ -195,6 +196,7 @@ ACTOR Future<Void> testKVCommit(KVTest* test, TestHistogram<float>* latency, Per
 Future<Void> testKVStore(struct KVStoreTestWorkload* const&);
 
 struct KVStoreTestWorkload : TestWorkload {
+	static constexpr auto NAME = "KVStoreTest";
 	bool enabled, saturation;
 	double testDuration, operationsPerSecond;
 	double commitFraction, setFraction;
@@ -209,21 +211,20 @@ struct KVStoreTestWorkload : TestWorkload {
 	KVStoreTestWorkload(WorkloadContext const& wcx)
 	  : TestWorkload(wcx), reads("Reads"), sets("Sets"), commits("Commits"), setupTook(0) {
 		enabled = !clientId; // only do this on the "first" client
-		testDuration = getOption(options, LiteralStringRef("testDuration"), 10.0);
-		operationsPerSecond = getOption(options, LiteralStringRef("operationsPerSecond"), 100e3);
-		commitFraction = getOption(options, LiteralStringRef("commitFraction"), .001);
-		setFraction = getOption(options, LiteralStringRef("setFraction"), .1);
-		nodeCount = getOption(options, LiteralStringRef("nodeCount"), 100000);
-		keyBytes = getOption(options, LiteralStringRef("keyBytes"), 8);
-		valueBytes = getOption(options, LiteralStringRef("valueBytes"), 8);
-		doSetup = getOption(options, LiteralStringRef("setup"), false);
-		doClear = getOption(options, LiteralStringRef("clear"), false);
-		doCount = getOption(options, LiteralStringRef("count"), false);
-		filename = getOption(options, LiteralStringRef("filename"), Value()).toString();
-		saturation = getOption(options, LiteralStringRef("saturation"), false);
-		storeType = getOption(options, LiteralStringRef("storeType"), LiteralStringRef("ssd")).toString();
+		testDuration = getOption(options, "testDuration"_sr, 10.0);
+		operationsPerSecond = getOption(options, "operationsPerSecond"_sr, 100e3);
+		commitFraction = getOption(options, "commitFraction"_sr, .001);
+		setFraction = getOption(options, "setFraction"_sr, .1);
+		nodeCount = getOption(options, "nodeCount"_sr, 100000);
+		keyBytes = getOption(options, "keyBytes"_sr, 8);
+		valueBytes = getOption(options, "valueBytes"_sr, 8);
+		doSetup = getOption(options, "setup"_sr, false);
+		doClear = getOption(options, "clear"_sr, false);
+		doCount = getOption(options, "count"_sr, false);
+		filename = getOption(options, "filename"_sr, Value()).toString();
+		saturation = getOption(options, "saturation"_sr, false);
+		storeType = getOption(options, "storeType"_sr, "ssd"_sr).toString();
 	}
-	std::string description() const override { return "KVStoreTest"; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override {
 		if (enabled)
@@ -231,16 +232,16 @@ struct KVStoreTestWorkload : TestWorkload {
 		return Void();
 	}
 	Future<bool> check(Database const& cx) override { return true; }
-	void metricsFromHistogram(vector<PerfMetric>& m, std::string name, TestHistogram<float>& h) const {
-		m.push_back(PerfMetric("Min " + name, 1000.0 * h.min(), true));
-		m.push_back(PerfMetric("Average " + name, 1000.0 * h.mean(), true));
-		m.push_back(PerfMetric("Median " + name, 1000.0 * h.medianEstimate(), true));
-		m.push_back(PerfMetric("95%% " + name, 1000.0 * h.percentileEstimate(0.95), true));
-		m.push_back(PerfMetric("Max " + name, 1000.0 * h.max(), true));
+	void metricsFromHistogram(std::vector<PerfMetric>& m, std::string name, TestHistogram<float>& h) const {
+		m.emplace_back("Min " + name, 1000.0 * h.min(), Averaged::True);
+		m.emplace_back("Average " + name, 1000.0 * h.mean(), Averaged::True);
+		m.emplace_back("Median " + name, 1000.0 * h.medianEstimate(), Averaged::True);
+		m.emplace_back("95%% " + name, 1000.0 * h.percentileEstimate(0.95), Averaged::True);
+		m.emplace_back("Max " + name, 1000.0 * h.max(), Averaged::True);
 	}
-	void getMetrics(vector<PerfMetric>& m) override {
+	void getMetrics(std::vector<PerfMetric>& m) override {
 		if (setupTook)
-			m.push_back(PerfMetric("SetupTook", setupTook, false));
+			m.emplace_back("SetupTook", setupTook, Averaged::False);
 
 		m.push_back(reads.getMetric());
 		m.push_back(sets.getMetric());
@@ -250,7 +251,7 @@ struct KVStoreTestWorkload : TestWorkload {
 	}
 };
 
-WorkloadFactory<KVStoreTestWorkload> KVStoreTestWorkloadFactory("KVStoreTest");
+WorkloadFactory<KVStoreTestWorkload> KVStoreTestWorkloadFactory;
 
 ACTOR Future<Void> testKVStoreMain(KVStoreTestWorkload* workload, KVTest* ptest) {
 	state KVTest& test = *ptest;
@@ -270,7 +271,7 @@ ACTOR Future<Void> testKVStoreMain(KVStoreTestWorkload* workload, KVTest* ptest)
 		state Key k;
 		state double cst = timer();
 		while (true) {
-			RangeResult kv = wait(test.store->readRange(KeyRangeRef(k, LiteralStringRef("\xff\xff\xff\xff")), 1000));
+			RangeResult kv = wait(test.store->readRange(KeyRangeRef(k, "\xff\xff\xff\xff"_sr), 1000));
 			count += kv.size();
 			if (kv.size() < 1000)
 				break;
@@ -278,7 +279,7 @@ ACTOR Future<Void> testKVStoreMain(KVStoreTestWorkload* workload, KVTest* ptest)
 		}
 		double elapsed = timer() - cst;
 		TraceEvent("KVStoreCount").detail("Count", count).detail("Took", elapsed);
-		printf("Counted: %" PRId64 " in %0.1fs\n", count, elapsed);
+		fmt::print("Counted: {0} in {1:0.1f}s\n", count, elapsed);
 	}
 
 	if (workload->doSetup) {
@@ -318,7 +319,7 @@ ACTOR Future<Void> testKVStoreMain(KVStoreTestWorkload* workload, KVTest* ptest)
 				wait(testKVCommit(&test, &workload->commitLatency, &workload->commits));
 			}
 		} else {
-			vector<Future<Void>> actors;
+			std::vector<Future<Void>> actors;
 			actors.reserve(100);
 			for (int a = 0; a < 100; a++)
 				actors.push_back(testKVReadSaturation(&test, &workload->readLatency, &workload->reads));
@@ -383,10 +384,13 @@ ACTOR Future<Void> testKVStore(KVStoreTestWorkload* workload) {
 		test.store = keyValueStoreSQLite(fn, id, KeyValueStoreType::SSD_BTREE_V1);
 	else if (workload->storeType == "ssd-2")
 		test.store = keyValueStoreSQLite(fn, id, KeyValueStoreType::SSD_REDWOOD_V1);
-	else if (workload->storeType == "ssd-redwood-experimental")
+	else if (workload->storeType == "ssd-redwood-1-experimental")
 		test.store = keyValueStoreRedwoodV1(fn, id);
-	else if (workload->storeType == "ssd-rocksdb-experimental")
+	else if (workload->storeType == "ssd-rocksdb-v1")
 		test.store = keyValueStoreRocksDB(fn, id, KeyValueStoreType::SSD_ROCKSDB_V1);
+	else if (workload->storeType == "ssd-sharded-rocksdb")
+		test.store = keyValueStoreRocksDB(
+		    fn, id, KeyValueStoreType::SSD_SHARDED_ROCKSDB); // TODO: to replace the KVS in the future
 	else if (workload->storeType == "memory")
 		test.store = keyValueStoreMemory(fn, id, 500e6);
 	else if (workload->storeType == "memory-radixtree-beta")
@@ -400,7 +404,9 @@ ACTOR Future<Void> testKVStore(KVStoreTestWorkload* workload) {
 	try {
 		choose {
 			when(wait(main)) {}
-			when(wait(test.store->getError())) { ASSERT(false); }
+			when(wait(test.store->getError())) {
+				ASSERT(false);
+			}
 		}
 	} catch (Error& e) {
 		err = e;

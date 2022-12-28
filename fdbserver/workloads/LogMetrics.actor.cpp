@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2022 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,17 +31,18 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 struct LogMetricsWorkload : TestWorkload {
+	static constexpr auto NAME = "LogMetrics";
+
 	std::string dataFolder;
 	double logAt, logDuration, logsPerSecond;
 
 	LogMetricsWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		logAt = getOption(options, LiteralStringRef("logAt"), 0.0);
-		logDuration = getOption(options, LiteralStringRef("logDuration"), 30.0);
-		logsPerSecond = getOption(options, LiteralStringRef("logsPerSecond"), 20);
-		dataFolder = getOption(options, LiteralStringRef("dataFolder"), LiteralStringRef("")).toString();
+		logAt = getOption(options, "logAt"_sr, 0.0);
+		logDuration = getOption(options, "logDuration"_sr, 30.0);
+		logsPerSecond = getOption(options, "logsPerSecond"_sr, 20);
+		dataFolder = getOption(options, "dataFolder"_sr, ""_sr).toString();
 	}
 
-	std::string description() const override { return "LogMetricsWorkload"; }
 	Future<Void> setup(Database const& cx) override { return Void(); }
 	Future<Void> start(Database const& cx) override {
 		if (clientId)
@@ -52,8 +53,8 @@ struct LogMetricsWorkload : TestWorkload {
 	ACTOR Future<Void> setSystemRate(LogMetricsWorkload* self, Database cx, uint32_t rate) {
 		// set worker interval and ss interval
 		state BinaryWriter br(Unversioned());
-		vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
-		// vector<Future<Void>> replies;
+		std::vector<WorkerDetails> workers = wait(getWorkers(self->dbInfo));
+		// std::vector<Future<Void>> replies;
 		TraceEvent("RateChangeTrigger").log();
 		SetMetricsLogRateRequest req(rate);
 		for (int i = 0; i < workers.size(); i++) {
@@ -91,7 +92,7 @@ struct LogMetricsWorkload : TestWorkload {
 	}
 
 	Future<bool> check(Database const& cx) override { return true; }
-	void getMetrics(vector<PerfMetric>& m) override {}
+	void getMetrics(std::vector<PerfMetric>& m) override {}
 };
 
-WorkloadFactory<LogMetricsWorkload> LogMetricsWorkloadFactory("LogMetrics");
+WorkloadFactory<LogMetricsWorkload> LogMetricsWorkloadFactory;
